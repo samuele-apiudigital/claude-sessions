@@ -4,6 +4,6 @@ windows:
   - tabs:
       - title: Claude Sessions
         layout:
-          cwd: /Users/samuelecostantini
+          cwd: /Users/YOUR_USER
           commands:
-            - exec: /Users/samuelecostantini/.claude/scripts/claude-sessions
+            - exec: /Users/YOUR_USER/.claude/scripts/claude-sessions

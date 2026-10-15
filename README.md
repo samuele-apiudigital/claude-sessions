@@ -41,7 +41,7 @@ Claude Code only passes rate limits to the status line. Add
 
 ## Open at login (Warp)
 
-Copy `extras/warp-launch-configuration.yaml` to `~/.warp/launch_configurations/`
+Edit `YOUR_USER` in `extras/warp-launch-configuration.yaml`, then copy it to `~/.warp/launch_configurations/`
 and `extras/com.user.claude-sessions.plist` to `~/Library/LaunchAgents/`, then
 `launchctl load` it.
 
