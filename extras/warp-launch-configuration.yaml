@@ -1,0 +1,9 @@
+---
+name: claude-sessions
+windows:
+  - tabs:
+      - title: Claude Sessions
+        layout:
+          cwd: /Users/samuelecostantini
+          commands:
+            - exec: /Users/samuelecostantini/.claude/scripts/claude-sessions

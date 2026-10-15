@@ -1,0 +1,474 @@
+#!/bin/sh
+# Usage: claude-sessions [-a|--all] [-w|--watch] [-j|--json]
+#   default: live sessions only; -a also lists recent finished transcripts (last 24h)
+exec python3 -I - "$@" <<'PY'
+import json, os, sys, glob, time, subprocess, shutil
+args = sys.argv[1:]
+ISTTY = sys.stdout.isatty()
+FRAME = 0
+SEL = None
+TILES = []
+MSG = ("", 0.0)
+show_all = any(a in ("-a", "--all") for a in args)
+as_json = any(a in ("-j", "--json") for a in args)
+table = any(a in ("-t", "--table") for a in args)
+watch = any(a in ("-w", "--watch") for a in args)
+HOME = os.path.expanduser("~/.claude")
+WINDOW = int(os.environ.get("CLAUDE_CTX_WINDOW", "0"))
+
+def alive(pid):
+    try: os.kill(pid, 0); return True
+    except OSError: return False
+
+def etime(pid):
+    try: return subprocess.check_output(["ps", "-p", str(pid), "-o", "etime="], text=True).strip()
+    except Exception: return "-"
+
+def fmt(n):
+    return f"{n/1e6:.1f}M" if n >= 1e6 else f"{n/1e3:.0f}k" if n >= 1e3 else str(n)
+
+def ago(ms):
+    s = max(0, int(time.time() - ms/1000))
+    return f"{s}s" if s < 60 else f"{s//60}m" if s < 3600 else f"{s//3600}h{s%3600//60:02d}m" if s < 86400 else f"{s//86400}d"
+
+def transcript(sid):
+    m = glob.glob(f"{HOME}/projects/*/{sid}.jsonl")
+    return m[0] if m else None
+
+def stats(path):
+    s = dict(model="-", ctx=0, peak=0, turns=0, out=0, inp=0, cread=0, ccreate=0, tools=0, hist=[], title="", branch="", wd="", ultra=False, prompt="", cur_task="", done_task="", subjects=None, ncreate=0, first=None, last=None)
+    s["subjects"] = {}
+    if not path: return s
+    with open(path, errors="ignore") as f:
+        for line in f:
+            try: d = json.loads(line)
+            except Exception: continue
+            t = d.get("type")
+            if t == "ai-title": s["title"] = d.get("aiTitle", "")
+            if t == "attachment":
+                at = (d.get("attachment") or {}).get("type")
+                if at == "ultra_effort_enter": s["ultra"] = True
+                elif at == "ultra_effort_exit": s["ultra"] = False
+            if t == "last-prompt": s["prompt"] = d.get("lastPrompt", "") or s["prompt"]
+            if d.get("gitBranch"): s["branch"] = d["gitBranch"]
+            if d.get("cwd"): s["wd"] = d["cwd"]
+            ts = d.get("timestamp")
+            if ts:
+                s["first"] = s["first"] or ts
+                s["last"] = ts
+            if t == "user" and not d.get("isSidechain"):
+                c = d.get("message", {}).get("content")
+                if isinstance(c, str) or (isinstance(c, list) and any(x.get("type") == "text" for x in c if isinstance(x, dict))):
+                    s["turns"] += 1
+            if t == "assistant":
+                m = d.get("message", {})
+                u = m.get("usage") or {}
+                if m.get("model") and not m["model"].startswith("<"): s["model"] = m["model"]
+                i, cr, cc, o = (u.get(k, 0) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"))
+                if not d.get("isSidechain"):
+                    s["ctx"] = i + cr + cc
+                    s["peak"] = max(s["peak"], s["ctx"])
+                    s["hist"].append(s["ctx"])
+                s["inp"] += i; s["cread"] += cr; s["ccreate"] += cc; s["out"] += o
+                for x in m.get("content", []):
+                    if not (isinstance(x, dict) and x.get("type") == "tool_use"): continue
+                    s["tools"] += 1
+                    inp = x.get("input") or {}
+                    if x.get("name") == "TaskCreate":
+                        s["ncreate"] += 1
+                        s["subjects"][str(s["ncreate"])] = inp.get("subject", "")
+                    elif x.get("name") == "TaskUpdate":
+                        tid, st_ = str(inp.get("taskId", "")), inp.get("status")
+                        text = inp.get("activeForm") or s["subjects"].get(tid, "")
+                        if st_ == "in_progress":
+                            s["cur_task"], s["cur_id"] = text, tid
+                        elif st_ in ("completed", "deleted"):
+                            s["done_task"] = s["subjects"].get(tid) or text or s["done_task"]
+                            if s.get("cur_id") == tid: s["cur_task"] = ""
+    s["hist"] = s["hist"][-36:]
+    return s
+
+def collect():
+    rows, seen = [], set()
+    for jf in glob.glob(f"{HOME}/sessions/*.json"):
+        try: d = json.load(open(jf))
+        except Exception: continue
+        pid, sid = d.get("pid"), d.get("sessionId")
+        live = bool(pid) and alive(pid)
+        if not live and not show_all: continue
+        seen.add(sid)
+        st = stats(transcript(sid))
+        rows.append(dict(sid=sid, pid=pid, live=live, status=d.get("status", "?") if live else "ended",
+            name=st["title"] or d.get("name"), cwd=st["wd"] or d.get("cwd", ""), kind=d.get("kind", ""),
+            entry=d.get("entrypoint", ""), version=d.get("version", ""), started=d.get("startedAt", 0),
+            updated=d.get("updatedAt", 0), uptime=etime(pid) if live else "-", **st))
+    if show_all:
+        cutoff = time.time() - 86400
+        for p in glob.glob(f"{HOME}/projects/*/*.jsonl"):
+            sid = os.path.basename(p)[:-6]
+            if sid in seen or os.path.getmtime(p) < cutoff: continue
+            st = stats(p)
+            rows.append(dict(sid=sid, pid=None, live=False, status="ended", name=st["title"],
+                cwd=st["wd"] or os.path.basename(os.path.dirname(p)), kind="", entry="", version="", started=0,
+                updated=int(os.path.getmtime(p)*1000), uptime="-", **st))
+    rows.sort(key=lambda r: (not r["live"], r["started"] if r["live"] else 0, -r["updated"]))
+    return rows
+
+def render_table(rows):
+    if as_json:
+        print(json.dumps(rows, indent=2)); return
+    cols = shutil.get_terminal_size((160, 20)).columns
+    G, Y, R, D, B, Z = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
+    if not ISTTY: G = Y = R = D = B = Z = ""
+    print(f"{B}{'PID':<7}{'STATUS':<9}{'CONTEXT':<22}{'MODEL':<18}{'TURNS':>5} {'TOOLS':>5} {'OUT':>6} {'CACHE-R':>8} {'UP':>9} {'IDLE':>6}  SESSION{Z}")
+    for r in rows:
+        w = WINDOW or (1_000_000 if r["peak"] > 200_000 else 200_000)
+        pct = r["ctx"] / w * 100
+        n = 10; fill = min(n, round(pct / 100 * n))
+        col = R if pct >= 85 else Y if pct >= 60 else G
+        bar = f"{col}{'█'*fill}{D}{'░'*(n-fill)}{Z} {fmt(r['ctx']):>5} {pct:3.0f}%"
+        sc = G if r["status"] == "busy" else Y if r["status"] == "idle" else D
+        proj = os.path.basename(r["cwd"].rstrip("/")) or r["cwd"]
+        label = f"{r['name'] or r['title'] or r['sid'][:8]} {D}[{proj}]{Z}"
+        pid = str(r["pid"] or "-")
+        print(f"{pid:<7}{sc}{r['status']:<9}{Z}{bar:<{22+len(col)+len(D)+len(Z)}}{r['model'].replace('claude-',''):<18}"
+              f"{r['turns']:>5} {r['tools']:>5} {fmt(r['out']):>6} {fmt(r['cread']):>8} {r['uptime']:>9} {ago(r['updated']) if r['updated'] else '-':>6}  {label}"[:cols+40])
+    live = [r for r in rows if r["live"]]
+    print(f"{D}{len(live)} live / {len(rows)} shown · ctx = last request input (input+cache) · window assumed {'$CLAUDE_CTX_WINDOW' if WINDOW else '200k, 1M if peak>200k'}{Z}")
+
+import re, unicodedata
+_ansi = re.compile(r"\033\[[0-9;]*m")
+def vw(t):
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 0 if unicodedata.combining(c) else 1 for c in _ansi.sub("", t))
+def pad(t, w):
+    return t + " " * max(0, w - vw(t))
+def clip(t, w):
+    if vw(t) <= w: return t
+    o = ""
+    for c in t:
+        if vw(o + c) > w - 1: break
+        o += c
+    return o + "…"
+
+def usage_line(width):
+    tty = ISTTY
+    C = lambda n: f"\033[{n}m" if tty else ""
+    Z, D, B = C(0), C(2), C(1)
+    col = lambda p: C("38;5;167") if p >= 85 else C("38;5;179") if p >= 60 else C("38;5;114")
+    try:
+        d = json.load(open(f"{HOME}/state/rate-limits.json"))
+    except Exception:
+        return f"{D} usage limits: no data yet (appears after the next status line refresh){Z}"
+    rl, now = d.get("rate_limits") or {}, time.time()
+    def rem(sec):
+        sec = int(max(0, sec))
+        dd, r = divmod(sec, 86400); hh, r = divmod(r, 3600); mm = r // 60
+        return f"{dd}d{hh}h" if dd else f"{hh}h{mm:02d}m" if hh else f"{mm}m"
+    parts = []
+    for key, lab, fmt_t in (("five_hour", "5h", "%H:%M"), ("seven_day", "7d", "%a %H:%M")):
+        w = rl.get(key)
+        if not w: continue
+        pct, rs = float(w.get("used_percentage") or 0), w.get("resets_at")
+        if rs and rs < now:
+            parts.append(f"{B}{lab}{Z} {D}window reset{Z}")
+            continue
+        n = 14
+        f = min(n, round(pct / 100 * n))
+        bar = f"{col(pct)}{'█'*f}{D}{'░'*(n-f)}{Z}"
+        when = f" {D}resets{Z} {time.strftime(fmt_t, time.localtime(rs))} {D}(in {rem(rs-now)}){Z}" if rs else ""
+        parts.append(f"{B}{lab}{Z} {bar} {col(pct)}{B}{pct:.0f}%{Z}{when}")
+    age = rem(now - d.get("ts", now))
+    sep = f"  {D}│{Z}  "
+    return " " + sep.join(parts) + f"{sep}{D}updated {age} ago{Z}" if parts else f"{D} usage limits: n/a{Z}"
+
+def render(rows):
+    if as_json or table:
+        return render_table(rows)
+    tty = ISTTY
+    C = lambda n: f"\033[{n}m" if tty else ""
+    TC = lambda n: f"\033[38;5;{n}m" if tty else ""
+    Z, B, D = C(0), C(1), C(2)
+    CY = TC(81)
+    ORANGE, GREEN, AMBER, GRAY, RED, FG = TC(173), TC(114), TC(179), TC(240), TC(167), TC(253)
+    WAITGRAY = TC(248)
+    RAINBOW = [TC(n) for n in (196, 208, 220, 82, 45, 63, 171)]
+    def logo_line(i, r, text):
+        if r.get("ultra") and r["live"]:
+            ph = FRAME // 2
+            return "".join(f"{RAINBOW[(k + ph) % len(RAINBOW)]}{c}" if c != " " else c for k, c in enumerate(text)) + Z
+        return f"{ORANGE}{text}{Z}"
+    cols = max(shutil.get_terminal_size((120, 20)).columns, 34)
+    spark = "▁▂▃▄▅▆▇█"
+    logo = [" ▐▛███▜▌  ", "▝▜█████▛▘ ", "  ▘▘ ▝▝   "]
+
+    def state(r):
+        st = r["status"]
+        if st == "busy": return "RUNNING", ORANGE
+        if st == "idle": return "WAITING", WAITGRAY
+        if st == "ended": return "ENDED", GRAY
+        return st.upper(), AMBER
+
+    live = [r for r in rows if r["live"]]
+    nrun = sum(1 for r in live if r["status"] == "busy")
+    nwait = sum(1 for r in live if r["status"] == "idle")
+    nother = len(live) - nrun - nwait
+    head = (f" {ORANGE}{B}✻ Claude sessions{Z}   {ORANGE}●{Z} {nrun} running   {WAITGRAY}●{Z} {nwait} waiting"
+            + (f"   {AMBER}●{Z} {nother} other" if nother else "")
+            + f"   {D}·  {fmt(sum(r['ctx'] for r in live))} context  ·  {fmt(sum(r['out'] for r in rows))} output  ·  {time.strftime('%H:%M:%S')}{Z}")
+    print(head + "\n")
+
+    def make(r, W):
+        iw = W - 8
+        label, sc = state(r)
+        busy = r["status"] == "busy"
+        w = WINDOW or (1_000_000 if r["peak"] > 200_000 else 200_000)
+        pct = min(100.0, r["ctx"] / w * 100)
+        bc = RED if pct >= 85 else AMBER if pct >= 60 else sc if r["status"] != "ended" else GRAY
+        proj = os.path.basename(r["cwd"].rstrip("/")) or r["cwd"]
+        ent = {"claude-vscode": "VS Code", "cli": "CLI"}.get(r["entry"], r["entry"] or "")
+        tag = clip(f"#{r['pid']}" + (f" · {ent}" if ent else "") if r["pid"] else "transcript", W - 8)
+        bd = sc if r["status"] != "ended" else GRAY
+        tw = iw - 11
+        fill = round(pct / 100 * iw)
+        bar = f"{bc}{'█'*fill}{GRAY}{'░'*(iw-fill)}{Z}"
+        hist = r["hist"]
+        sp = ""
+        if hist:
+            pts = [hist[int(i * len(hist) / iw)] for i in range(iw)]
+            sp = "".join(spark[min(7, int(v / w * 8))] for v in pts)
+        half = iw // 2
+        def pair(l1, v1, l2, v2):
+            return pad(f"{D}{l1}{Z} {FG}{v1}{Z}", half) + f"{D}{l2}{Z} {FG}{v2}{Z}"
+        home = os.path.expanduser("~")
+        wd = r["cwd"]
+        if wd.startswith(home): wd = "~" + wd[len(home):]
+        dw = iw - 5
+        if vw(wd) > dw: wd = "…" + wd[-(dw - 1):]
+        br = r["branch"] if r["branch"] and r["branch"] != "HEAD" else ""
+        brl = f"{CY}{clip(br, dw)}{Z}" if br else f"{D}none{Z}"
+        one = lambda x: " ".join(str(x).split())
+        if r["status"] == "busy":
+            tt = one(r["cur_task"] or r["prompt"])
+            task_l = f"{ORANGE}▶{Z} {FG}{clip(tt, dw - 2)}{Z}" if tt else f"{D}working…{Z}"
+        else:
+            tt = one(r["done_task"] or r["prompt"])
+            task_l = f"{WAITGRAY}✓{Z} {D}{clip(tt, dw - 2)}{Z}" if tt else f"{D}—{Z}"
+        lines = [
+            "",
+            "",
+            f"{logo_line(0, r, logo[0])}{B}{FG}{clip(r['name'] or r['sid'][:8], tw)}{Z}",
+            f"{logo_line(1, r, logo[1])}{sc}{'●' if not busy or FRAME // 4 % 2 == 0 else '○'}{Z} {sc}{B}{label}{Z}" + (f" {sc}{'⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[FRAME % 10]}{Z}" if busy else ""),
+            logo_line(2, r, logo[2] if not busy else logo[2][::-1] if FRAME // 3 % 2 else logo[2]),
+            "",
+            f"{D}dir{Z}  {FG}{wd}{Z}",
+            f"{D}git{Z}  {brl}",
+            f"{D}task{Z} {task_l}",
+            "",
+            pad(f"{D}CONTEXT{Z} {FG}{fmt(r['ctx'])}{D}/{fmt(w)}{Z}", iw - 4) + f"{bc}{B}{pct:3.0f}%{Z}",
+            bar,
+            bar,
+            "",
+            f"{D}MODEL{Z} {FG}{clip(r['model'].replace('claude-',''), iw-6)}{Z}",
+            pair("turns", r["turns"], "tools", r["tools"]),
+            pair("out", fmt(r["out"]), "cache", fmt(r["cread"])),
+            pair("up", r["uptime"], "idle", ago(r["updated"]) if r["updated"] else "-"),
+            "",
+            "",
+        ]
+        nd = max(0, W - 5 - vw(tag))
+        if busy and nd:
+            pos = FRAME % (nd + 6) - 6
+            dashes = "".join(f"{FG}{B}━{Z}{bd}" if 0 <= i - pos < 6 else "─" for i in range(nd))
+        else:
+            dashes = "─" * nd
+        sel = r["sid"] == SEL
+        TL, TR, BL, BR, HZ, VT = ("╔", "╗", "╚", "╝", "═", "║") if sel else ("╭", "╮", "╰", "╯", "─", "│")
+        if sel: dashes = dashes.replace("─", "═")
+        top = f"{bd}{B if sel else ''}{TL}{HZ} {D}{tag}{Z}{bd}{B if sel else ''} " + dashes + f"{TR}{Z}"
+        t = [top]
+        for ln in lines:
+            t.append(f"{bd}{VT}{Z}   {pad(ln, iw)}   {bd}{VT}{Z}")
+        t.append(f"{bd}{BL}{HZ*(W-2)}{BR}{Z}")
+        return t
+
+    per = max(1, cols // 52)
+    base, extra = divmod(cols - (per - 1), per)
+    ws = [base + (1 if j < extra else 0) for j in range(per)]
+    if tty and not watch:
+        sys.stdout.write("\033[H\033[2J")
+    TILES.clear()
+    for i in range(0, len(rows), per):
+        chunk = rows[i:i+per]
+        tiles = [make(r, ws[j]) for j, r in enumerate(chunk)]
+        for j, r in enumerate(chunk):
+            x0 = sum(ws[:j]) + j + 1
+            y0 = 3 + (i // per) * len(tiles[0])
+            TILES.append(dict(sid=r["sid"], idx=i + j, x0=x0, x1=x0 + ws[j] - 1, y0=y0, y1=y0 + len(tiles[0]) - 1))
+        for ln in zip(*tiles):
+            print(" ".join(ln))
+    print(f"{D} ctx = last request input · window {'$CLAUDE_CTX_WINDOW' if WINDOW else '200k, 1M if peak>200k'} · -o once · -t table · -a all · -j json{Z}")
+
+def _run(cmd, **kw):
+    if os.environ.get("CS_DRY"):
+        print("DRY", " ".join(map(str, cmd))[:300], file=sys.stderr)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    return subprocess.run(cmd, **kw)
+
+def focus(r):
+    import re as _re
+    pid = r.get("pid")
+    if not (r.get("live") and pid): return "session not running"
+    try:
+        ps = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
+    except Exception as e:
+        return f"ps failed: {e}"
+    info = {}
+    for ln in ps.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            info[int(parts[0])] = (int(parts[1]), parts[2])
+    chain, cur = [], pid
+    while cur in info and len(chain) < 40:
+        ppid, cmd = info[cur]
+        chain.append(cmd)
+        if ppid <= 1: break
+        cur = ppid
+    apps = []
+    for c in chain:
+        m = _re.search(r"/([^/]+)\.app/", c)
+        if m and m.group(1) not in apps: apps.append(m.group(1))
+    if r.get("entry") == "claude-vscode" or ".vscode/extensions" in chain[0]:
+        app = "Cursor" if ".cursor" in chain[0] else "Visual Studio Code"
+    else:
+        app = next((a for a in apps if a not in ("Claude",)), None)
+        if not app: return "terminal app not found"
+    cwd = r.get("cwd") or ""
+    if app in ("Visual Studio Code", "Cursor", "Code", "Windsurf") or "Code" in app:
+        name = {"Code": "Visual Studio Code"}.get(app, app)
+        _run(["open", "-a", name] + ([cwd] if os.path.isdir(cwd) else []), timeout=8)
+        return f"focused {name} → {os.path.basename(cwd)}"
+    try:
+        tty = subprocess.check_output(["ps", "-p", str(pid), "-o", "tty="], text=True).strip()
+    except Exception:
+        tty = ""
+    dev = f"/dev/{tty}" if tty and tty != "??" else ""
+    script = None
+    if app == "Terminal" and dev:
+        script = f'''tell application "Terminal"
+activate
+repeat with w in windows
+repeat with t in tabs of w
+if tty of t is "{dev}" then
+set selected of t to true
+set index of w to 1
+return "ok"
+end if
+end repeat
+end repeat
+end tell'''
+    elif app.startswith("iTerm") and dev:
+        script = f'''tell application "iTerm"
+activate
+repeat with w in windows
+repeat with t in tabs of w
+repeat with s in sessions of t
+if tty of s is "{dev}" then
+select w
+select t
+select s
+return "ok"
+end if
+end repeat
+end repeat
+end repeat
+end tell'''
+    if script:
+        res = _run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+        if res.returncode == 0: return f"focused {app} tab {tty}"
+        return f"{app}: {res.stderr.strip()[:80] or 'osascript failed'}"
+    _run(["open", "-a", app], timeout=8)
+    return f"focused {app} (this app can't select a specific tab)"
+
+once = any(a in ("-o", "--once") for a in args)
+if as_json or table or once or not sys.stdout.isatty():
+    watch = False
+    render(collect())
+    if not (as_json or table):
+        print(usage_line(0))
+else:
+    import io, select, termios, tty, contextlib
+    watch = True
+    out = sys.stdout
+    try: kb = open("/dev/tty")
+    except OSError: kb = None
+    fd = kb.fileno() if kb else None
+    old = termios.tcgetattr(fd) if kb else None
+    out.write("\033[?1049h\033[?25l\033[?1000h\033[?1006h")
+    out.flush()
+    try:
+        if old: tty.setcbreak(fd)
+        last = 0
+        data = []
+        while True:
+            if time.time() - last >= 2:
+                data = collect()
+                last = time.time()
+            if True:
+                FRAME += 1
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    render(data)
+                lines = buf.getvalue().rstrip("\n").split("\n")
+                h = shutil.get_terminal_size((120, 30)).lines
+                body = lines[:max(1, h - 3)]
+                hint = "\033[2m ←↑↓→ select · enter/click focus · q quit · a " + ("hide ended" if show_all else "show ended") + " · r refresh \033[0m"
+                if MSG[0] and time.time() - MSG[1] < 5: hint += "  \033[38;5;173m▸ " + MSG[0] + "\033[0m"
+                out.write("\033[H" + "".join(l + "\033[K\n" for l in body) + "\033[J" + f"\033[{h-1};1H" + usage_line(0) + f"\033[K\033[{h};1H" + hint)
+                out.flush()
+            r, _, _ = select.select([kb], [], [], 0.15) if old else (time.sleep(0.15), ([], 0, 0))[1]
+            if r:
+                import re as _re
+                raw = os.read(fd, 256).decode(errors="ignore")
+                events = []
+                for m in _re.finditer(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])", raw):
+                    if m.group(4) == "M" and int(m.group(1)) == 0:
+                        events.append(("click", int(m.group(2)), int(m.group(3))))
+                rest = _re.sub(r"\x1b\[<[0-9;]+[Mm]", "", raw)
+                for m in _re.finditer(r"\x1b[\[O]([ABCD])|(.)", rest, _re.S):
+                    if m.group(1): events.append(("arrow", m.group(1)))
+                    else: events.append(("key", m.group(2)))
+                done = False
+                for ev in events:
+                    if ev[0] == "click":
+                        hit = next((t for t in TILES if t["x0"] <= ev[1] <= t["x1"] and t["y0"] <= ev[2] <= t["y1"]), None)
+                        if hit:
+                            SEL = hit["sid"]
+                            row = next((x for x in data if x["sid"] == SEL), None)
+                            if row: MSG = (focus(row), time.time())
+                    elif ev[0] == "arrow":
+                        if not data: continue
+                        ids = [x["sid"] for x in data]
+                        cur = ids.index(SEL) if SEL in ids else -1
+                        per_row = max(1, len({t["x0"] for t in TILES}))
+                        d = {"C": 1, "D": -1, "B": per_row, "A": -per_row}[ev[1]]
+                        cur = 0 if cur < 0 else min(len(ids) - 1, max(0, cur + d))
+                        SEL = ids[cur]
+                    else:
+                        k = ev[1]
+                        if k in ("q", "Q", "\x03"): done = True
+                        elif k == "\x1b": done = True
+                        elif k in ("a", "A"): show_all = not show_all; last = 0
+                        elif k in ("r", "R"): last = 0
+                        elif k in ("\r", "\n", " "):
+                            row = next((x for x in data if x["sid"] == SEL), None)
+                            if row: MSG = (focus(row), time.time())
+                            else: MSG = ("select a session with the arrow keys first", time.time())
+                if done: break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if old: termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        out.write("\033[?1000l\033[?1006l\033[?25h\033[?1049l")
+        out.flush()
+
+PY
