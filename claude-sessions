@@ -15,6 +15,12 @@ table = any(a in ("-t", "--table") for a in args)
 watch = any(a in ("-w", "--watch") for a in args)
 HOME = os.path.expanduser("~/.claude")
 WINDOW = int(os.environ.get("CLAUDE_CTX_WINDOW", "0"))
+CHAT_DIR = f"{HOME}/state/cs-chat"
+CHAT_MODEL = os.environ.get("CS_CHAT_MODEL", "haiku")
+CHAT_ALLOW = os.environ.get("CS_CHAT_ALLOW", "Bash(open:*),Bash(ls:*),Bash(find:*),Bash(mdfind:*),Bash(wc:*),Bash(head:*),Bash(grep:*)")
+CHAT_ROWS = int(os.environ.get("CS_CHAT_ROWS", "8"))
+REPO_ROOTS = [r for r in (os.path.expanduser(x).rstrip("/") for x in os.environ.get("CS_REPO_ROOTS", "~/Projects").split(":")) if os.path.isdir(r)]
+CHAT, CHAT_SID, CHAT_PROC, REPOS, INPUT, CHAT_T0 = [], None, None, None, None, 0.0
 
 def alive(pid):
     try: os.kill(pid, 0); return True
@@ -96,6 +102,7 @@ def collect():
         pid, sid = d.get("pid"), d.get("sessionId")
         live = bool(pid) and alive(pid)
         if not live and not show_all: continue
+        if d.get("cwd") == CHAT_DIR: continue
         seen.add(sid)
         st = stats(transcript(sid))
         rows.append(dict(sid=sid, pid=pid, live=live, status=d.get("status", "?") if live else "ended",
@@ -108,6 +115,7 @@ def collect():
             sid = os.path.basename(p)[:-6]
             if sid in seen or os.path.getmtime(p) < cutoff: continue
             st = stats(p)
+            if st["wd"] == CHAT_DIR: continue
             rows.append(dict(sid=sid, pid=None, live=False, status="ended", name=st["title"],
                 cwd=st["wd"] or os.path.basename(os.path.dirname(p)), kind="", entry="", version="", started=0,
                 updated=int(os.path.getmtime(p)*1000), uptime="-", **st))
@@ -291,8 +299,9 @@ def render(rows):
         t.append(f"{bd}{BL}{HZ*(W-2)}{BR}{Z}")
         return t
 
-    per = max(1, cols // 52)
-    base, extra = divmod(cols - (per - 1), per)
+    avail = cols - 1
+    per = max(1, avail // 52)
+    base, extra = divmod(avail - (per - 1), per)
     ws = [base + (1 if j < extra else 0) for j in range(per)]
     if tty and not watch:
         sys.stdout.write("\033[H\033[2J")
@@ -389,6 +398,130 @@ end tell'''
     _run(["open", "-a", app], timeout=8)
     return f"focused {app} (this app can't select a specific tab)"
 
+def find_repos():
+    found = []
+    for root in REPO_ROOTS:
+        base = root.count("/")
+        for dp, dns, fns in os.walk(root):
+            if ".git" in dns or ".git" in fns:
+                found.append(dp); dns[:] = []; continue
+            if dp.count("/") - base >= 3: dns[:] = []
+            dns[:] = [x for x in dns if not x.startswith(".") and x not in ("node_modules", "vendor")]
+    return sorted(set(found))[:400]
+
+def chat_system():
+    return ("You are the command bar of the user's claude-sessions terminal dashboard on macOS, isolated from their "
+        "coding sessions: never edit files. The user types short requests such as \"open repo x in VS Code\" or "
+        "\"show y in Finder\". Carry them out with Bash, usually one command, then answer in one short plain-text "
+        "line without markdown.\n"
+        "Commands: VS Code `open -a \"Visual Studio Code\" <dir>` · Finder `open <dir>` (a file: `open -R <file>`) · "
+        "Warp `open -a Warp <dir>` · a URL `open <url>`.\n"
+        "Match repo names loosely (case, dashes, partial names) against the list below; if two match equally, ask "
+        "which one. Only these Bash commands are allowed, so build commands (pipes included) from them alone: "
+        + CHAT_ALLOW + ". If something needs another command, show it so the user can run it.\n"
+        "Git repos on this machine:\n" + "\n".join(REPOS or ["(none found)"]))
+
+def chat_send(text, rows):
+    global CHAT_SID, CHAT_PROC, REPOS, CHAT_T0
+    if text == "/clear":
+        CHAT.clear(); CHAT_SID = None
+        return
+    if CHAT_PROC:
+        CHAT.append(("err", "still working on the previous request"))
+        return
+    import threading, uuid
+    if REPOS is None: REPOS = find_repos()
+    os.makedirs(CHAT_DIR, exist_ok=True)
+    live = "\n".join(f"- {r['name'] or r['sid'][:8]} · {r['status']} · {r['cwd']}" for r in rows if r["live"])
+    prompt = f"<dashboard>\nLive Claude sessions (name · status · dir):\n{live or '- none'}\n</dashboard>\n\n{text}"
+    resume = bool(CHAT_SID and transcript(CHAT_SID))
+    CHAT_SID = CHAT_SID or str(uuid.uuid4())
+    cmd = [shutil.which("claude") or os.path.expanduser("~/.local/bin/claude"), "-p", prompt,
+        "--model", CHAT_MODEL, "--tools", "Bash", "--allowedTools", CHAT_ALLOW, "--permission-mode", "dontAsk",
+        *(a for r in REPO_ROOTS for a in ("--add-dir", r)), "--strict-mcp-config", "--disable-slash-commands", "--output-format", "stream-json", "--verbose",
+        "--append-system-prompt", chat_system(), "--resume" if resume else "--session-id", CHAT_SID]
+    CHAT.append(("you", text))
+    CHAT_T0 = time.time()
+    try:
+        CHAT_PROC = subprocess.Popen(cmd, cwd=CHAT_DIR, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    except OSError as e:
+        CHAT.append(("err", f"cannot start claude: {e}"))
+        return
+    threading.Thread(target=chat_read, args=(CHAT_PROC,), daemon=True).start()
+
+def chat_read(p):
+    global CHAT_PROC
+    replied, noise = False, []
+    for line in p.stdout:
+        try: d = json.loads(line)
+        except Exception:
+            if line.strip(): noise.append(line.strip())
+            continue
+        t = d.get("type")
+        if t == "assistant":
+            for x in d.get("message", {}).get("content") or []:
+                if x.get("type") == "text" and x.get("text", "").strip():
+                    CHAT.append(("claude", x["text"].strip())); replied = True
+                elif x.get("type") == "tool_use":
+                    CHAT.append(("tool", (x.get("input") or {}).get("command") or x.get("name", "")))
+        elif t == "user":
+            for x in d.get("message", {}).get("content") or []:
+                if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("is_error"):
+                    c = x.get("content")
+                    if isinstance(c, list): c = " ".join(y.get("text", "") for y in c if isinstance(y, dict))
+                    CHAT.append(("err", "blocked: not in CS_CHAT_ALLOW" if "Permission to use" in str(c) else str(c)))
+        elif t == "result" and d.get("is_error"):
+            CHAT.append(("err", str(d.get("result") or d.get("subtype") or "request failed"))); replied = True
+    p.wait()
+    if p.returncode and not replied:
+        CHAT.append(("err", noise[-1] if noise else f"claude exited with code {p.returncode}"))
+    CHAT_PROC = None
+
+def chat_view(cols):
+    import textwrap
+    T = lambda n: f"\033[38;5;{n}m"
+    Z, B, D = "\033[0m", "\033[1m", "\033[2m"
+    ORANGE, GRAY, RED, FG, MID, UBG = T(173), T(240), T(167), T(253), T(245), "\033[48;5;236m"
+    on = INPUT is not None
+    W = max(30, cols - 1)
+    inner = W - 4
+    bd = ORANGE if on else GRAY
+    home = os.path.expanduser("~")
+    log = []
+    for kind, text in CHAT:
+        if kind == "tool":
+            cmd = (str(text).splitlines() or [""])[0].replace(home, "~")
+            log.append(f"  {GRAY}⎿{Z}  {MID}$ {clip(cmd, inner - 7)}{Z}")
+            continue
+        for i, seg in enumerate(textwrap.wrap(" ".join(str(text).split()), inner - 3) or [""]):
+            first = i == 0
+            if kind == "you":
+                log.append(f"{UBG}{FG}" + pad(f" {'›' if first else ' '} {seg}", inner) + Z)
+            elif kind == "claude":
+                log.append(f"{ORANGE}{'⏺' if first else ' '}{Z} {FG}{seg}{Z}")
+            else:
+                log.append(f"{RED}{'✗' if first else ' '} {seg}{Z}")
+    if CHAT_PROC:
+        log.append(f"{ORANGE}{'·✢✳✶✻✽✻✶✳✢'[FRAME % 10]} Working…{Z} {D}{int(time.time() - CHAT_T0)}s{Z}")
+    tip = "open a repo in VS Code, show it in Finder…"
+    if not on:
+        field = f"{GRAY}❯{Z} {D}{clip('press / to ask Claude · ' + tip, inner - 2)}{Z}"
+    elif INPUT:
+        room = inner - 3
+        cur = "\033[7m \033[27m" if FRAME // 3 % 2 == 0 else " "
+        field = f"{ORANGE}{B}❯{Z} {FG}{B}{INPUT[-room:] if vw(INPUT) > room else INPUT}{Z}{cur}"
+    else:
+        cur = "\033[7m \033[27m" if FRAME // 3 % 2 == 0 else " "
+        field = f"{ORANGE}{B}❯{Z} {cur}{D}{clip(tip, inner - 3)}{Z}"
+    head = f"{bd}╭─{Z} {ORANGE}{B}✻ Ask Claude{Z} "
+    side = f" {D}{CHAT_MODEL} · {'enter send · esc close' if on else '/ to type'}{Z} {bd}─╮{Z}"
+    row = lambda x: f"{bd}│{Z} {pad(x, inner)} {bd}│{Z}"
+    out = [head + f"{bd}{'─' * max(0, W - vw(head) - vw(side))}{Z}" + side]
+    if log:
+        out += [row(x) for x in log[-CHAT_ROWS:]] + [f"{bd}├{'─' * (W - 2)}┤{Z}"]
+    return out + [row(field), f"{bd}╰{'─' * (W - 2)}╯{Z}"]
+
 once = any(a in ("-o", "--once") for a in args)
 if as_json or table or once or not sys.stdout.isatty():
     watch = False
@@ -419,28 +552,52 @@ else:
                 with contextlib.redirect_stdout(buf):
                     render(data)
                 lines = buf.getvalue().rstrip("\n").split("\n")
-                h = shutil.get_terminal_size((120, 30)).lines
-                body = lines[:max(1, h - 3)]
-                hint = "\033[2m ←↑↓→ select · enter/click focus · q quit · a " + ("hide ended" if show_all else "show ended") + " · r refresh \033[0m"
+                sz = shutil.get_terminal_size((120, 30))
+                h = sz.lines
+                if INPUT is None:
+                    hint = "\033[2m ←↑↓→ select · enter/click focus · / chat · q quit · a " + ("hide ended" if show_all else "show ended") + " · r refresh \033[0m"
+                else:
+                    hint = "\033[2m enter send · esc close chat · ctrl-u clear line · /clear new chat \033[0m"
                 if MSG[0] and time.time() - MSG[1] < 5: hint += "  \033[38;5;173m▸ " + MSG[0] + "\033[0m"
-                out.write("\033[H" + "".join(l + "\033[K\n" for l in body) + "\033[J" + f"\033[{h-1};1H" + usage_line(0) + f"\033[K\033[{h};1H" + hint)
+                chat = chat_view(sz.columns)
+                bottom = chat + [usage_line(0), hint]
+                body = lines[:max(1, h - len(bottom) - 1)]
+                BODY_H, CHAT_Y = len(body), (h - len(bottom) + 1, h - 2)
+                out.write("\033[H" + "".join(l + "\033[K\n" for l in body) + "\033[J"
+                    + "".join(f"\033[{h - len(bottom) + 1 + i};1H{l}\033[K" for i, l in enumerate(bottom)))
                 out.flush()
             r, _, _ = select.select([kb], [], [], 0.15) if old else (time.sleep(0.15), ([], 0, 0))[1]
             if r:
                 import re as _re
-                raw = os.read(fd, 256).decode(errors="ignore")
+                raw = os.read(fd, 4096).decode(errors="ignore")
                 events = []
                 for m in _re.finditer(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])", raw):
                     if m.group(4) == "M" and int(m.group(1)) == 0:
                         events.append(("click", int(m.group(2)), int(m.group(3))))
                 rest = _re.sub(r"\x1b\[<[0-9;]+[Mm]", "", raw)
-                for m in _re.finditer(r"\x1b[\[O]([ABCD])|(.)", rest, _re.S):
-                    if m.group(1): events.append(("arrow", m.group(1)))
-                    else: events.append(("key", m.group(2)))
+                for m in _re.finditer(r"\x1b[\[O]([0-9;]*)([A-Za-z~])|(.)", rest, _re.S):
+                    if m.group(2):
+                        if not m.group(1) and m.group(2) in "ABCD": events.append(("arrow", m.group(2)))
+                    else: events.append(("key", m.group(3)))
                 done = False
                 for ev in events:
+                    if INPUT is not None and ev[0] != "click":
+                        k = ev[1] if ev[0] == "key" else ""
+                        if k == "\x03": done = True
+                        elif k in ("\x1b", "\t"): INPUT = None
+                        elif k in ("\r", "\n"):
+                            if INPUT.strip(): chat_send(INPUT.strip(), data)
+                            INPUT = ""
+                        elif k in ("\x7f", "\x08"): INPUT = INPUT[:-1]
+                        elif k == "\x15": INPUT = ""
+                        elif k.isprintable(): INPUT += k
+                        continue
                     if ev[0] == "click":
-                        hit = next((t for t in TILES if t["x0"] <= ev[1] <= t["x1"] and t["y0"] <= ev[2] <= t["y1"]), None)
+                        if CHAT_Y[0] <= ev[2] <= CHAT_Y[1]:
+                            INPUT = INPUT or ""
+                            continue
+                        INPUT = None
+                        hit = next((t for t in TILES if t["x0"] <= ev[1] <= t["x1"] and t["y0"] <= ev[2] <= min(t["y1"], BODY_H)), None)
                         if hit:
                             SEL = hit["sid"]
                             row = next((x for x in data if x["sid"] == SEL), None)
@@ -457,6 +614,7 @@ else:
                         k = ev[1]
                         if k in ("q", "Q", "\x03"): done = True
                         elif k == "\x1b": done = True
+                        elif k in ("/", "\t"): INPUT = ""
                         elif k in ("a", "A"): show_all = not show_all; last = 0
                         elif k in ("r", "R"): last = 0
                         elif k in ("\r", "\n", " "):
@@ -467,6 +625,7 @@ else:
     except KeyboardInterrupt:
         pass
     finally:
+        if CHAT_PROC: CHAT_PROC.terminate()
         if old: termios.tcsetattr(fd, termios.TCSADRAIN, old)
         out.write("\033[?1000l\033[?1006l\033[?25h\033[?1049l")
         out.flush()
