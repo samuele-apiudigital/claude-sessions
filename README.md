@@ -33,13 +33,12 @@ Focus works for VS Code (window of the session's folder), Terminal.app and iTerm
 Press `/` (or click the `›` line) to talk to a small Claude of its own, separate from
 your sessions: "open claude-sessions in VS Code", "show ariston in Finder". Enter sends,
 Esc closes, `/clear` starts a new chat. It knows the git repos under `CS_REPO_ROOTS`
-and your live sessions, and runs headless (`claude -p`) in "don't ask" mode, so only
-allowlisted commands run; anything else it tells you instead of running.
+and your live sessions, and runs headless (`claude -p`) with every tool and MCP server
+and permissions bypassed, so it acts without asking.
 
 | Variable          | Default                                         |
 |-------------------|-------------------------------------------------|
 | `CS_CHAT_MODEL`   | `haiku`                                         |
-| `CS_CHAT_ALLOW`   | `Bash(open:*),Bash(ls:*),Bash(find:*),Bash(mdfind:*),Bash(wc:*),Bash(head:*),Bash(grep:*)` |
 | `CS_REPO_ROOTS`   | `~/Projects` (colon-separated)                  |
 | `CS_CHAT_ROWS`    | `8` chat lines shown                            |
 

@@ -17,7 +17,6 @@ HOME = os.path.expanduser("~/.claude")
 WINDOW = int(os.environ.get("CLAUDE_CTX_WINDOW", "0"))
 CHAT_DIR = f"{HOME}/state/cs-chat"
 CHAT_MODEL = os.environ.get("CS_CHAT_MODEL", "haiku")
-CHAT_ALLOW = os.environ.get("CS_CHAT_ALLOW", "Bash(open:*),Bash(ls:*),Bash(find:*),Bash(mdfind:*),Bash(wc:*),Bash(head:*),Bash(grep:*)")
 CHAT_ROWS = int(os.environ.get("CS_CHAT_ROWS", "8"))
 REPO_ROOTS = [r for r in (os.path.expanduser(x).rstrip("/") for x in os.environ.get("CS_REPO_ROOTS", "~/Projects").split(":")) if os.path.isdir(r)]
 CHAT, CHAT_SID, CHAT_PROC, REPOS, INPUT, CHAT_T0 = [], None, None, None, None, 0.0
@@ -410,15 +409,13 @@ def find_repos():
     return sorted(set(found))[:400]
 
 def chat_system():
-    return ("You are the command bar of the user's claude-sessions terminal dashboard on macOS, isolated from their "
-        "coding sessions: never edit files. The user types short requests such as \"open repo x in VS Code\" or "
-        "\"show y in Finder\". Carry them out with Bash, usually one command, then answer in one short plain-text "
-        "line without markdown.\n"
+    return ("You are the command bar of the user's claude-sessions terminal dashboard on macOS, separate from their "
+        "coding sessions. The user types short requests such as \"open repo x in VS Code\" or \"show y in Finder\". "
+        "Carry them out, then answer in one short plain-text line without markdown.\n"
         "Commands: VS Code `open -a \"Visual Studio Code\" <dir>` · Finder `open <dir>` (a file: `open -R <file>`) · "
         "Warp `open -a Warp <dir>` · a URL `open <url>`.\n"
         "Match repo names loosely (case, dashes, partial names) against the list below; if two match equally, ask "
-        "which one. Only these Bash commands are allowed, so build commands (pipes included) from them alone: "
-        + CHAT_ALLOW + ". If something needs another command, show it so the user can run it.\n"
+        "which one.\n"
         "Git repos on this machine:\n" + "\n".join(REPOS or ["(none found)"]))
 
 def chat_send(text, rows):
@@ -437,8 +434,7 @@ def chat_send(text, rows):
     resume = bool(CHAT_SID and transcript(CHAT_SID))
     CHAT_SID = CHAT_SID or str(uuid.uuid4())
     cmd = [shutil.which("claude") or os.path.expanduser("~/.local/bin/claude"), "-p", prompt,
-        "--model", CHAT_MODEL, "--tools", "Bash", "--allowedTools", CHAT_ALLOW, "--permission-mode", "dontAsk",
-        *(a for r in REPO_ROOTS for a in ("--add-dir", r)), "--strict-mcp-config", "--disable-slash-commands", "--output-format", "stream-json", "--verbose",
+        "--model", CHAT_MODEL, "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose",
         "--append-system-prompt", chat_system(), "--resume" if resume else "--session-id", CHAT_SID]
     CHAT.append(("you", text))
     CHAT_T0 = time.time()
@@ -464,13 +460,15 @@ def chat_read(p):
                 if x.get("type") == "text" and x.get("text", "").strip():
                     CHAT.append(("claude", x["text"].strip())); replied = True
                 elif x.get("type") == "tool_use":
-                    CHAT.append(("tool", (x.get("input") or {}).get("command") or x.get("name", "")))
+                    inp = x.get("input") or {}
+                    arg = next((v for v in inp.values() if isinstance(v, str)), "")
+                    CHAT.append(("tool", f"$ {inp['command']}" if inp.get("command") else f"{x.get('name', '').split('__')[-1]} {arg}"))
         elif t == "user":
             for x in d.get("message", {}).get("content") or []:
                 if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("is_error"):
                     c = x.get("content")
                     if isinstance(c, list): c = " ".join(y.get("text", "") for y in c if isinstance(y, dict))
-                    CHAT.append(("err", "blocked: not in CS_CHAT_ALLOW" if "Permission to use" in str(c) else str(c)))
+                    CHAT.append(("err", str(c)[:300]))
         elif t == "result" and d.get("is_error"):
             CHAT.append(("err", str(d.get("result") or d.get("subtype") or "request failed"))); replied = True
     p.wait()
@@ -492,7 +490,7 @@ def chat_view(cols):
     for kind, text in CHAT:
         if kind == "tool":
             cmd = (str(text).splitlines() or [""])[0].replace(home, "~")
-            log.append(f"  {GRAY}⎿{Z}  {MID}$ {clip(cmd, inner - 7)}{Z}")
+            log.append(f"  {GRAY}⎿{Z}  {MID}{clip(cmd, inner - 5)}{Z}")
             continue
         for i, seg in enumerate(textwrap.wrap(" ".join(str(text).split()), inner - 3) or [""]):
             first = i == 0
