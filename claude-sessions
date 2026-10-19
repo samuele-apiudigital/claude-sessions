@@ -1,10 +1,11 @@
 #!/bin/sh
-# Usage: claude-sessions [-a|--all] [-w|--watch] [-j|--json] [-s|--serve [PORT]]
+# Usage: claude-sessions [-a|--all] [-w|--web] [-j|--json] [-s|--serve [PORT]]
 #   default: live sessions only; -a also lists recent finished transcripts (last 24h)
 #   -s serves the dashboard as a web page on 127.0.0.1 (default port 7421, or $CS_PORT)
+#   -w opens that web page in the browser instead of the terminal dashboard
 export CS_SELF="$0"
 exec python3 -I - "$@" <<'PY'
-import json, os, sys, glob, time, subprocess, shutil, re
+import json, os, sys, glob, time, subprocess, shutil, re, threading
 from datetime import datetime
 args = sys.argv[1:]
 ISTTY = sys.stdout.isatty()
@@ -15,7 +16,8 @@ MSG = ("", 0.0)
 show_all = any(a in ("-a", "--all") for a in args)
 as_json = any(a in ("-j", "--json") for a in args)
 table = any(a in ("-t", "--table") for a in args)
-watch = any(a in ("-w", "--watch") for a in args)
+watch = False
+web_only = any(a in ("-w", "--web") for a in args)
 HOME = os.path.expanduser("~/.claude")
 WINDOW = int(os.environ.get("CLAUDE_CTX_WINDOW", "0"))
 CHAT_DIR = f"{HOME}/state/cs-chat"
@@ -24,6 +26,8 @@ CHAT_ROWS = int(os.environ.get("CS_CHAT_ROWS", "8"))
 AGENT_ROWS = max(2, int(os.environ.get("CS_AGENT_ROWS", "4")))
 REPO_ROOTS = [r for r in (os.path.expanduser(x).rstrip("/") for x in os.environ.get("CS_REPO_ROOTS", "~/Projects").split(":")) if os.path.isdir(r)]
 CHAT, CHAT_SID, CHAT_PROC, REPOS, INPUT, CHAT_T0 = [], None, None, None, None, 0.0
+WEB_URL, WEB_HIT, WEB_LABEL = None, None, "open web view ↗"
+CHAT_LOCK = threading.Lock()
 
 def alive(pid):
     try: os.kill(pid, 0); return True
@@ -581,6 +585,9 @@ def chat_system():
         "Git repos on this machine:\n" + "\n".join(REPOS or ["(none found)"]))
 
 def chat_send(text, rows):
+    with CHAT_LOCK: _chat_send(text, rows)
+
+def _chat_send(text, rows):
     global CHAT_SID, CHAT_PROC, REPOS, CHAT_T0
     if text == "/clear":
         CHAT.clear(); CHAT_SID = None
@@ -682,7 +689,7 @@ def chat_view(cols):
         out += [row(x) for x in log[-CHAT_ROWS:]] + [f"{bd}├{'─' * (W - 2)}┤{Z}"]
     return out + [row(field), f"{bd}╰{'─' * (W - 2)}╯{Z}"]
 
-def serve(port, fixed):
+def server(port):
     import threading, secrets
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
     from urllib.parse import urlparse, parse_qs
@@ -795,13 +802,52 @@ def serve(port, fixed):
                 return self.reply(200, chat_state())
             self.reply(404, {"error": "not found"})
 
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    except OSError as e:
-        if fixed: sys.exit(f"claude-sessions: cannot listen on 127.0.0.1:{port}: {e.strerror}")
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
     srv.daemon_threads = True
     if not os.path.isfile(page): print(f"warning: {page} not found", file=sys.stderr)
+    return srv
+
+def ours(port):
+    import urllib.request
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(f"http://127.0.0.1:{port}/manifest.webmanifest", timeout=0.5) as r:
+            return json.load(r).get("name") == "Claude sessions"
+    except Exception:
+        return False
+
+def web_start():
+    global WEB_URL
+    port = os.environ.get("CS_PORT", "")
+    fixed = port.isdigit()
+    port = int(port) if fixed else 7421
+    try: srv = server(port)
+    except OSError as e:
+        if ours(port):
+            WEB_URL = f"http://127.0.0.1:{port}"
+            return None, ""
+        if fixed: return None, f"web: cannot listen on 127.0.0.1:{port}: {e.strerror}"
+        try: srv = server(0)
+        except OSError as e: return None, f"web: cannot start: {e.strerror}"
+    WEB_URL = f"http://127.0.0.1:{srv.server_address[1]}"
+    return srv, ""
+
+def web_app():
+    import plistlib
+    from urllib.parse import urlparse
+    port = urlparse(WEB_URL).port
+    for app in glob.glob(os.path.expanduser("~/Applications/*.app")) + glob.glob(os.path.expanduser("~/Applications/*/*.app")):
+        try:
+            with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f: u = urlparse(plistlib.load(f).get("CrAppModeShortcutURL") or "")
+        except Exception:
+            continue
+        if u.hostname in ("127.0.0.1", "localhost") and u.port == port: return app
+    return None
+
+def open_web():
+    app = web_app()
+    _run(["open", "-a", app] if app else ["open", WEB_URL])
+
+def serve(srv):
     print(f"claude-sessions web: http://127.0.0.1:{srv.server_address[1]}  (ctrl-c to stop)", flush=True)
     try: srv.serve_forever()
     except KeyboardInterrupt: pass
@@ -814,7 +860,17 @@ serve_at = next((i for i, a in enumerate(args) if a in ("-s", "--serve")), None)
 if serve_at is not None:
     nxt = args[serve_at + 1] if serve_at + 1 < len(args) else ""
     port = nxt if nxt.isdigit() else os.environ.get("CS_PORT", "")
-    serve(int(port) if port.isdigit() else 7421, port.isdigit())
+    try: srv = server(int(port) if port.isdigit() else 7421)
+    except OSError as e:
+        if port.isdigit(): sys.exit(f"claude-sessions: cannot listen on 127.0.0.1:{port}: {e.strerror}")
+        srv = server(0)
+    serve(srv)
+elif web_only:
+    srv, err = web_start()
+    if err: sys.exit(f"claude-sessions: {err}")
+    open_web()
+    if srv: serve(srv)
+    else: print(f"claude-sessions web: already served at {WEB_URL}, opened it")
 elif as_json or table or once or not sys.stdout.isatty():
     watch = False
     render(collect())
@@ -823,6 +879,9 @@ elif as_json or table or once or not sys.stdout.isatty():
 else:
     import io, select, termios, tty, contextlib
     watch = True
+    srv, err = web_start()
+    if srv: threading.Thread(target=srv.serve_forever, daemon=True).start()
+    if err: MSG = (err, time.time())
     out = sys.stdout
     try: kb = open("/dev/tty")
     except OSError: kb = None
@@ -847,9 +906,13 @@ else:
                 sz = shutil.get_terminal_size((120, 30))
                 h = sz.lines
                 if INPUT is None:
-                    hint = "\033[2m ←↑↓→ select · enter/click focus · / chat · q quit · a " + ("hide ended" if show_all else "show ended") + " · r refresh \033[0m"
+                    hint = "\033[2m ←↑↓→ select · enter/click focus · / chat · q quit · a " + ("hide ended" if show_all else "show ended") + " · r refresh" + (" · w " if WEB_URL else " ") + "\033[0m"
                 else:
-                    hint = "\033[2m enter send · esc close chat · ctrl-u clear line · /clear new chat \033[0m"
+                    hint = "\033[2m enter send · esc close chat · ctrl-u clear line · /clear new chat" + (" · " if WEB_URL else " ") + "\033[0m"
+                WEB_HIT = None
+                if WEB_URL and vw(hint) + vw(WEB_LABEL) < sz.columns:
+                    WEB_HIT = (h, vw(hint) + 1, vw(hint) + vw(WEB_LABEL))
+                    hint += f"\033[4;38;5;81m{WEB_LABEL}\033[0m"
                 if MSG[0] and time.time() - MSG[1] < 5: hint += "  \033[38;5;173m▸ " + MSG[0] + "\033[0m"
                 chat = chat_view(sz.columns)
                 bottom = chat + [usage_line(0), hint]
@@ -885,6 +948,9 @@ else:
                         elif k.isprintable(): INPUT += k
                         continue
                     if ev[0] == "click":
+                        if WEB_HIT and ev[2] == WEB_HIT[0] and WEB_HIT[1] <= ev[1] <= WEB_HIT[2]:
+                            open_web()
+                            continue
                         if CHAT_Y[0] <= ev[2] <= CHAT_Y[1]:
                             INPUT = INPUT or ""
                             continue
@@ -909,6 +975,9 @@ else:
                         elif k in ("/", "\t"): INPUT = ""
                         elif k in ("a", "A"): show_all = not show_all; last = 0
                         elif k in ("r", "R"): last = 0
+                        elif k in ("w", "W"):
+                            if WEB_URL: open_web()
+                            else: MSG = ("web view not running", time.time())
                         elif k in ("\r", "\n", " "):
                             row = next((x for x in data if x["sid"] == SEL), None)
                             if row: MSG = (focus(row), time.time())

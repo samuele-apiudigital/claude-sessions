@@ -17,15 +17,21 @@ Requires `python3` (stdlib only). Run `cs`.
 
 | Command   | What it does                                 |
 |-----------|----------------------------------------------|
-| `cs`      | live full-screen dashboard                   |
+| `cs`      | live full-screen dashboard (+ web view)      |
 | `cs -o`   | print once and exit                          |
 | `cs -a`   | also show sessions ended in the last 24h     |
 | `cs -t`   | classic table layout                         |
 | `cs -j`   | JSON output                                  |
 | `cs -s`   | web dashboard on http://127.0.0.1:7421       |
+| `cs -w`   | open the web dashboard instead of the TUI    |
 
 Keys: arrows select, Enter or click focuses the session's app, `/` opens the chat,
-`a` toggles ended sessions, `r` refreshes, `q`/Esc quits.
+`a` toggles ended sessions, `r` refreshes, `w` opens the web view, `q`/Esc quits.
+
+`cs` also serves the web dashboard in the background and shows an `open web view ↗` link on the bottom
+line (click it or press `w`). It uses the same port as `cs -s` (`7421` or `$CS_PORT`); if a
+`cs -s` or another `cs` is already serving there, it links to that one instead. The server
+stops when `cs` quits.
 
 Focus works for VS Code (window of the session's folder), Terminal.app and iTerm2
 (exact tab by tty). Other terminals (e.g. Warp) are only brought to the front.
@@ -36,6 +42,12 @@ Focus works for VS Code (window of the session's folder), Terminal.app and iTerm
 bar and the chat, refreshed every 2s. It listens on `127.0.0.1:7421` (or the first free port
 if that one is taken); `cs -s 8080` or `CS_PORT=8080 cs -s` uses a fixed port. The page lives in
 `web/index.html` and is re-read on every load.
+
+`cs -w` does the same and opens the page in your browser, without the terminal dashboard. If a
+`cs` or `cs -s` is already serving on that port, it just opens that one and exits.
+
+`cs -w`, `w` and the `open web view ↗` link open the installed app instead of a browser tab when
+there is one for the same port (Chrome, Edge or Brave apps in `~/Applications`).
 
 Keys: arrows select, Enter or click focuses the session's app, `/` opens the chat (Esc closes),
 `a` toggles ended sessions, `t` switches between tiles and the table layout, `r` refreshes.
