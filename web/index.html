@@ -23,6 +23,13 @@
     <p class="note" id="note"></p>
   </main>
   <footer class="dock">
+    <nav class="projects" id="projects" aria-label="Projects">
+      <span class="proj-label">projects</span>
+      <div class="proj-list" id="projList"></div>
+      <div class="proj-find"><input id="projQ" autocomplete="off" spellcheck="false" placeholder="search projects (p)" aria-label="Search projects"><div class="proj-menu" id="projMenu" role="listbox" hidden></div></div>
+      <button class="proj-dir" id="projDir" type="button"></button>
+      <input class="proj-dir-in" id="projDirIn" autocomplete="off" spellcheck="false" aria-label="Projects folder" hidden>
+    </nav>
     <section class="chat" id="chat" aria-label="Ask Claude">
       <div class="chat-head"><span class="chat-title">✻ Ask Claude</span><span class="chat-side" id="chatSide"></span></div>
       <div class="chat-log" id="chatLog" hidden></div>
@@ -58,6 +65,7 @@ let offline = false;
 let FRAME = 0;
 let lastPoll = 0, polling = false, chatSig = "";
 let themeSetAt = 0;
+let projSel = 0, projSig = "";
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const one = s => String(s ?? "").split(/\s+/).filter(Boolean).join(" ");
@@ -275,6 +283,55 @@ function syncAnim(el) {
 
 function chatOn() { return document.activeElement === ask; }
 
+function projMatch(q, items) {
+  q = q.toLowerCase().trim();
+  if (!q) return items;
+  const score = p => {
+    const n = p.name.toLowerCase(), r = p.rel.toLowerCase();
+    if (n.startsWith(q)) return 0;
+    if (n.includes(q)) return 1;
+    if (r.includes(q)) return 2;
+    let i = 0;
+    for (const c of q.replace(/ /g, "")) { i = r.indexOf(c, i) + 1; if (!i) return null; }
+    return 3;
+  };
+  return items.map((p, i) => [score(p), i, p]).filter(h => h[0] !== null).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(h => h[2]);
+}
+
+function renderProjects() {
+  const all = S.projects || [], cfg = S.cfg.projects || {};
+  const recent = all.filter(p => p.t);
+  const show = recent.length ? recent : all;
+  const sig = JSON.stringify(show.map(p => [p.path, p.name]));
+  if (sig !== projSig) {
+    $("projList").innerHTML = show.length
+      ? show.map(p => `<button type="button" class="proj" data-path="${esc(p.path)}" title="${esc(home(p.path))} · open in VS Code">${esc(p.name)}</button>`).join("")
+      : `<span class="dim">no git repos in ${esc(cfg.dir)}</span>`;
+    projSig = sig;
+  }
+  const dir = $("projDir");
+  dir.textContent = cfg.env ? "$CS_REPO_ROOTS" : cfg.dir;
+  dir.title = cfg.env ? "set by CS_REPO_ROOTS, which overrides the setting" : "projects folder · click to change";
+}
+
+function renderMenu() {
+  const q = $("projQ"), m = $("projMenu");
+  if (document.activeElement !== q || !S) { m.hidden = true; return; }
+  const hits = projMatch(q.value, S.projects || []).slice(0, 12);
+  projSel = Math.max(0, Math.min(projSel, hits.length - 1));
+  m.innerHTML = hits.length
+    ? hits.map((p, i) => `<div class="proj-opt${i === projSel ? " on" : ""}" role="option" aria-selected="${i === projSel}" data-path="${esc(p.path)}"><span class="n">${esc(p.name)}</span><span class="r">${esc(p.rel)}</span></div>`).join("")
+    : `<div class="proj-none">no match</div>`;
+  m.hidden = false;
+  m._hits = hits;
+}
+
+async function openProject(path) {
+  try { flash = [(await api("/api/open", { path })).msg, Date.now()]; }
+  catch (e) { flash = [`could not open the project: ${e.message}`, Date.now()]; }
+  renderHint();
+}
+
 function render() {
   if (!S) { renderHint(); return; }
   const rows = S.sessions;
@@ -291,6 +348,7 @@ function render() {
   }
   $("note").textContent = `ctx = last request input · window ${S.cfg.window ? "$CLAUDE_CTX_WINDOW" : "200k, 1M if peak>200k"}`;
   $("usage").innerHTML = usageHTML(S.usage);
+  renderProjects();
 
   const on = chatOn();
   $("chat").classList.toggle("on", on);
@@ -314,7 +372,8 @@ function render() {
 function renderHint() {
   const keys = chatOn()
     ? "enter send · esc close chat · ctrl-u clear line · /clear new chat"
-    : `←↑↓→ select · enter/click focus · / chat · a ${showAll ? "hide ended" : "show ended"} · t ${view === "tiles" ? "table" : "tiles"} · r refresh${installPrompt ? " · i install app" : ""}`;
+    : document.activeElement === $("projQ") ? "type to filter · ↑↓ select · enter open in VS Code · esc close"
+    : `←↑↓→ select · enter/click focus · / chat · p projects · a ${showAll ? "hide ended" : "show ended"} · t ${view === "tiles" ? "table" : "tiles"} · r refresh${installPrompt ? " · i install app" : ""}`;
   let h = esc(keys);
   if (flash[0] && Date.now() - flash[1] < 5000) h += `<span class="flash">▸ ${esc(flash[0])}</span>`;
   if (offline) h += `<span class="off">✗ server not reachable, retrying…</span>`;
@@ -439,6 +498,7 @@ document.addEventListener("keydown", e => {
   if (k.startsWith("Arrow")) { e.preventDefault(); move(k); }
   else if (k === "Enter" || k === " ") { e.preventDefault(); focusSel(); }
   else if (k === "/") { e.preventDefault(); ask.focus(); }
+  else if (k === "p" || k === "P") { e.preventDefault(); $("projQ").focus(); }
   else if (k === "a" || k === "A") { showAll = !showAll; store.set("cs.all", showAll ? "1" : "0"); render(); poll(true); }
   else if (k === "r" || k === "R") poll(true);
   else if (k === "i" || k === "I") install();
@@ -461,6 +521,55 @@ function pick(e) {
   render();
   focusSel();
 }
+$("projList").addEventListener("click", e => {
+  const el = e.target.closest("[data-path]");
+  if (el) openProject(el.dataset.path);
+});
+const projQ = $("projQ");
+projQ.addEventListener("input", () => { projSel = 0; renderMenu(); });
+projQ.addEventListener("focus", () => { projSel = 0; renderMenu(); renderHint(); });
+projQ.addEventListener("blur", () => { projQ.value = ""; renderMenu(); renderHint(); });
+projQ.addEventListener("keydown", e => {
+  const hits = $("projMenu")._hits || [];
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); projSel += e.key === "ArrowDown" ? 1 : -1; renderMenu(); }
+  else if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); const p = hits[projSel]; projQ.blur(); if (p) openProject(p.path); }
+  else if (e.key === "Escape") { e.preventDefault(); projQ.blur(); }
+  else if (e.ctrlKey && (e.key === "u" || e.key === "U")) { e.preventDefault(); projQ.value = ""; projSel = 0; renderMenu(); }
+});
+$("projMenu").addEventListener("mousedown", e => {
+  e.preventDefault();
+  const el = e.target.closest("[data-path]");
+  if (el) { projQ.blur(); openProject(el.dataset.path); }
+});
+const dirIn = $("projDirIn");
+$("projDir").addEventListener("click", () => {
+  const cfg = S?.cfg.projects;
+  if (!cfg) return;
+  if (cfg.env) { flash = ["the projects folder is set by CS_REPO_ROOTS; unset it to change it here", Date.now()]; renderHint(); return; }
+  $("projDir").hidden = true;
+  dirIn.hidden = false;
+  dirIn.value = cfg.dir;
+  dirIn.focus();
+  dirIn.select();
+});
+function closeDir() { dirIn.hidden = true; $("projDir").hidden = false; }
+dirIn.addEventListener("blur", closeDir);
+dirIn.addEventListener("keydown", async e => {
+  if (e.key === "Escape") { e.preventDefault(); dirIn.blur(); return; }
+  if (e.key !== "Enter" || e.isComposing) return;
+  e.preventDefault();
+  try {
+    const r = await api("/api/settings", { projects: dirIn.value });
+    S.cfg.projects.dir = r.projects;
+    flash = [`projects folder: ${r.projects}`, Date.now()];
+    dirIn.blur();
+    poll(true);
+  } catch (err) {
+    flash = [err.message === "HTTP 400" ? `not a folder: ${dirIn.value}` : `could not save: ${err.message}`, Date.now()];
+  }
+  renderHint();
+});
+
 $("tiles").addEventListener("click", pick);
 $("table").addEventListener("click", pick);
 

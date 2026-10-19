@@ -26,7 +26,7 @@ Requires `python3` (stdlib only). Run `cs`.
 | `cs -w`   | open the web dashboard instead of the TUI    |
 
 Keys: arrows select, Enter or click focuses the session's app, `/` opens the chat,
-`a` toggles ended sessions, `r` refreshes, `w` opens the web view, `q`/Esc quits.
+`p` searches projects, `a` toggles ended sessions, `r` refreshes, `w` opens the web view, `q`/Esc quits.
 
 `cs` also serves the web dashboard in the background and shows an `open web view ↗` link on the bottom
 line (click it or press `w`). It uses the same port as `cs -s` (`7421` or `$CS_PORT`); if a
@@ -50,7 +50,7 @@ if that one is taken); `cs -s 8080` or `CS_PORT=8080 cs -s` uses a fixed port. T
 there is one for the same port (Chrome, Edge or Brave apps in `~/Applications`).
 
 Keys: arrows select, Enter or click focuses the session's app, `/` opens the chat (Esc closes),
-`a` toggles ended sessions, `t` switches between tiles and the table layout, `r` refreshes.
+`p` searches projects, `a` toggles ended sessions, `t` switches between tiles and the table layout, `r` refreshes.
 
 It can be installed as an app (its own window and Dock icon): press `i`, or use the install
 button in Chrome's address bar; in Safari use File › Add to Dock. The app needs `cs -s`
@@ -59,13 +59,14 @@ reloads itself when the server is back.
 
 ### Themes
 
-Pick a theme from the select in the top-right corner. Themes are listed in `.theme-config.json`,
+Pick a theme from the select in the top-right corner. Themes are listed in `.settings.json`,
 which also stores the selected one (the select writes it back; editing the file by hand works too,
 it is read on every request):
 
 ```json
 {
-  "selected": "terminal",
+  "projects": "~/Projects",
+  "theme": "terminal",
   "themes": [
     { "id": "terminal", "title": "Terminal", "file": "Terminal-theme.css" },
     { "id": "claude", "title": "Claude", "file": "Claude-theme.css" }
@@ -80,18 +81,29 @@ tokens listed at the top of `Terminal-theme.css`.
 It only accepts requests addressed to `127.0.0.1`/`localhost` that carry a token generated at
 startup, so other websites can't drive the chat (which runs with permissions bypassed).
 
+## Projects
+
+The line above the chat lists the git repos you used most recently with Claude (from
+`~/.claude/projects`); click one to open it in VS Code. `p` searches all repos in the projects
+folder: type to filter, arrows select, Enter opens, Esc closes. In the web view the line is a row
+of chips with a search box; the folder at its right end shows the projects folder, click it to
+change it.
+
+The projects folder is `projects` in `.settings.json` (default `~/Projects`, colon-separate several).
+Repos are found up to three levels deep. `CS_REPO_ROOTS`, if set, overrides it.
+
 ## Chat
 
 Press `/` (or click the `›` line) to talk to a small Claude of its own, separate from
 your sessions: "open claude-sessions in VS Code", "show ariston in Finder". Enter sends,
-Esc closes, `/clear` starts a new chat. It knows the git repos under `CS_REPO_ROOTS`
+Esc closes, `/clear` starts a new chat. It knows the git repos in the projects folder
 and your live sessions, and runs headless (`claude -p`) with every tool and MCP server
 and permissions bypassed, so it acts without asking.
 
 | Variable          | Default                                         |
 |-------------------|-------------------------------------------------|
 | `CS_CHAT_MODEL`   | `haiku`                                         |
-| `CS_REPO_ROOTS`   | `~/Projects` (colon-separated)                  |
+| `CS_REPO_ROOTS`   | overrides the projects folder (colon-separated) |
 | `CS_CHAT_ROWS`    | `8` chat lines shown                            |
 
 ## Agents

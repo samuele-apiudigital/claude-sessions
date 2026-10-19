@@ -197,6 +197,35 @@ kbd { font: inherit; color: var(--fg); }
 
 /* dock */
 .dock { flex: none; padding: 4px 28px 14px; }
+/* projects bar */
+.projects { display: flex; align-items: center; gap: 8px 12px; min-width: 0; font-size: 13px; }
+.proj-label { color: var(--dim); flex: none; }
+.proj-list { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; height: 28px; overflow: hidden; }
+.proj {
+  font: 500 13px var(--sans); color: var(--fg); background: var(--surface); white-space: nowrap; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 999px; padding: 4px 12px; height: 28px; transition: border-color .15s, color .15s;
+}
+.proj:hover, .proj:focus-visible { border-color: color-mix(in srgb, var(--orange) 55%, var(--line-strong)); color: var(--orange); outline: 0; }
+.proj-find { position: relative; flex: none; width: 210px; }
+#projQ {
+  width: 100%; font: 13px var(--sans); color: var(--fg); background: var(--surface); outline: 0; caret-color: var(--orange);
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 10px; transition: border-color .15s, box-shadow .15s;
+}
+#projQ:focus { border-color: color-mix(in srgb, var(--orange) 50%, var(--line-strong)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 14%, transparent); }
+#projQ::placeholder { color: var(--dim); }
+.proj-menu {
+  position: absolute; right: 0; bottom: calc(100% + 8px); width: min(420px, 90vw); z-index: 5;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow); padding: 6px;
+}
+.proj-opt { display: flex; justify-content: space-between; gap: 16px; padding: 6px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.proj-opt .n { flex: none; max-width: 65%; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.proj-opt .r { flex: 1; min-width: 0; text-align: right; color: var(--dim); font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+.proj-opt.on, .proj-opt:hover { background: var(--surface-2); }
+.proj-opt.on .n { color: var(--orange); }
+.proj-none { color: var(--dim); padding: 6px 10px; }
+.proj-dir { flex: none; max-width: 240px; font: 12px var(--mono); color: var(--dim); background: none; border: 0; padding: 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj-dir:hover, .proj-dir:focus-visible { color: var(--fg); text-decoration: underline; outline: 0; }
+.proj-dir-in { flex: none; width: 240px; font: 12px var(--mono); color: var(--fg); background: var(--surface); border: 1px solid color-mix(in srgb, var(--orange) 50%, var(--line-strong)); border-radius: 8px; padding: 5px 10px; outline: 0; }
 .chat {
   position: relative; margin-top: 8px; cursor: text;
   background: var(--surface); border: 1px solid var(--line-strong); border-radius: 20px;
@@ -236,6 +265,8 @@ kbd { font: inherit; color: var(--fg); }
 .hint .off { color: var(--red); margin-left: 12px; }
 
 @media (max-width: 640px) {
+  .proj-label, .proj-dir { display: none; }
+  .proj-find { width: 140px; }
   .top, .body, .dock { padding-left: 16px; padding-right: 16px; }
   .top { flex-wrap: wrap; }
   .tile { padding: 14px 16px 16px; }

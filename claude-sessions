@@ -24,8 +24,11 @@ CHAT_DIR = f"{HOME}/state/cs-chat"
 CHAT_MODEL = os.environ.get("CS_CHAT_MODEL", "haiku")
 CHAT_ROWS = int(os.environ.get("CS_CHAT_ROWS", "8"))
 AGENT_ROWS = max(2, int(os.environ.get("CS_AGENT_ROWS", "4")))
-REPO_ROOTS = [r for r in (os.path.expanduser(x).rstrip("/") for x in os.environ.get("CS_REPO_ROOTS", "~/Projects").split(":")) if os.path.isdir(r)]
-CHAT, CHAT_SID, CHAT_PROC, REPOS, INPUT, CHAT_T0 = [], None, None, None, None, 0.0
+ROOT = os.path.dirname(os.path.realpath(os.environ.get("CS_SELF") or "."))
+SETTINGS = os.path.join(ROOT, ".settings.json")
+SLOCK = threading.Lock()
+CHAT, CHAT_SID, CHAT_PROC, INPUT, CHAT_T0 = [], None, None, None, 0.0
+PROJ, PSEARCH, PSEL, PROJ_HITS, PROJ_Y = [], None, 0, [], 0
 WEB_URL, WEB_HIT, WEB_LABEL = None, None, "open web view ↗"
 CHAT_LOCK = threading.Lock()
 
@@ -563,9 +566,26 @@ end tell'''
     _run(["open", "-a", app], timeout=8)
     return f"focused {app} (this app can't select a specific tab)"
 
+def settings():
+    try: c = json.load(open(SETTINGS, encoding="utf-8"))
+    except (OSError, ValueError): c = {}
+    return c if isinstance(c, dict) else {}
+
+def save_settings(**kw):
+    with SLOCK:
+        c = settings()
+        c.update(kw)
+        tmp = SETTINGS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f: f.write(json.dumps(c, indent=2, ensure_ascii=False) + "\n")
+        os.replace(tmp, SETTINGS)
+
+def repo_roots():
+    raw = os.environ.get("CS_REPO_ROOTS") or settings().get("projects") or "~/Projects"
+    return [r for r in (os.path.expanduser(x.strip()).rstrip("/") for x in str(raw).split(":")) if os.path.isdir(r)]
+
 def find_repos():
     found = []
-    for root in REPO_ROOTS:
+    for root in repo_roots():
         base = root.count("/")
         for dp, dns, fns in os.walk(root):
             if ".git" in dns or ".git" in fns:
@@ -573,6 +593,89 @@ def find_repos():
             if dp.count("/") - base >= 3: dns[:] = []
             dns[:] = [x for x in dns if not x.startswith(".") and x not in ("node_modules", "vendor")]
     return sorted(set(found))[:400]
+
+def projects():
+    roots, repos = repo_roots(), find_repos()
+    enc = {re.sub(r"[^A-Za-z0-9]", "-", r): r for r in repos}
+    used = {}
+    try: dirs = os.listdir(f"{HOME}/projects")
+    except OSError: dirs = []
+    for d in dirs:
+        e = max((e for e in enc if d == e or d.startswith(e + "-")), key=len, default=None)
+        if not e: continue
+        for f in glob.glob(f"{HOME}/projects/{glob.escape(d)}/*.jsonl"):
+            try: used[enc[e]] = max(used.get(enc[e], 0), os.path.getmtime(f))
+            except OSError: pass
+    names = [os.path.basename(r) for r in repos]
+    rel = lambda r: next((r[len(x) + 1:] for x in roots if r.startswith(x + "/")), os.path.basename(r))
+    out = [dict(path=r, name=n if names.count(n) == 1 else "/".join(r.split("/")[-2:]), rel=rel(r), t=used.get(r, 0))
+        for r, n in zip(repos, names)]
+    return sorted(out, key=lambda p: (-p["t"], p["rel"].lower()))
+
+def proj_match(q, items):
+    q = q.lower().strip()
+    if not q: return items
+    def score(p):
+        n, r = p["name"].lower(), p["rel"].lower()
+        if n.startswith(q): return 0
+        if q in n: return 1
+        if q in r: return 2
+        it = iter(r)
+        return 3 if all(c in it for c in q.replace(" ", "")) else None
+    hits = [(score(p), i, p) for i, p in enumerate(items)]
+    return [p for sc, i, p in sorted((h for h in hits if h[0] is not None), key=lambda h: h[:2])]
+
+def open_project(path):
+    p = next((x for x in projects() if x["path"] == path), None)
+    if not p: return "project not found"
+    r = _run(["open", "-a", "Visual Studio Code", p["path"]], capture_output=True, text=True)
+    return f"opened {p['name']} in VS Code" if r.returncode == 0 else f"could not open VS Code: {(r.stderr or '').strip()[:120]}"
+
+def proj_view(cols):
+    T = lambda n: f"\033[38;5;{n}m"
+    Z, B, D = "\033[0m", "\033[1m", "\033[2m"
+    ORANGE, FG, CY = T(173), T(253), T(81)
+    hits, out = [], " "
+    roots = repo_roots()
+    folder = ":".join(r.replace(os.path.expanduser("~"), "~", 1) for r in roots) or "no projects folder"
+    if PSEARCH is None:
+        recent = [p for p in PROJ if p["t"]] or PROJ
+        right = f"{D}p search · {folder}{Z}"
+        out += f"{D}projects{Z}  "
+        room = cols - 1 - vw(right) - 2
+        n = 0
+        for p in recent:
+            sep = f"{D} · {Z}" if n else ""
+            more = f"{D} · +{len(PROJ) - n - 1}{Z}" if len(PROJ) - n - 1 > 0 else ""
+            if vw(out + sep + p["name"] + more) > room: break
+            out += sep
+            hits.append((vw(out) + 1, vw(out) + vw(p["name"]), p["path"]))
+            out += f"{FG}{p['name']}{Z}"
+            n += 1
+        if len(PROJ) > n: out += f"{D}{' · ' if n else ''}+{len(PROJ) - n}{Z}"
+        if not PROJ: out += f"{D}no git repos in {folder}{Z}"
+    else:
+        found = proj_match(PSEARCH, PROJ)
+        sel = min(PSEL, max(0, len(found) - 1))
+        cur = "\033[7m \033[27m" if FRAME // 3 % 2 == 0 else " "
+        out += f"{ORANGE}{B}❯{Z} {FG}{B}{PSEARCH}{Z}{cur}{'' if PSEARCH else D + 'search projects' + Z}  "
+        right = f"{D}{len(found)} found{Z}"
+        room = cols - 1 - vw(right) - 2
+        start = 0
+        while True:
+            line, hs = out, []
+            for i, p in enumerate(found[start:], start):
+                sep = f"{D} · {Z}" if hs else ""
+                label = f"▸ {p['name']}" if i == sel else p["name"]
+                if vw(line + sep + label) > room: break
+                line += sep
+                hs.append((vw(line) + 1, vw(line) + vw(label), p["path"]))
+                line += f"{ORANGE}{B}{label}{Z}" if i == sel else f"{FG}{p['name']}{Z}"
+            if start >= sel or any(h[2] == found[sel]["path"] for h in hs): break
+            start = sel
+        out, hits = line, hs
+        if not found: out += f"{D}no match{Z}"
+    return out + " " * max(1, cols - 1 - vw(out) - vw(right)) + right, hits
 
 def chat_system():
     return ("You are the command bar of the user's claude-sessions terminal dashboard on macOS, separate from their "
@@ -582,13 +685,13 @@ def chat_system():
         "Warp `open -a Warp <dir>` · a URL `open <url>`.\n"
         "Match repo names loosely (case, dashes, partial names) against the list below; if two match equally, ask "
         "which one.\n"
-        "Git repos on this machine:\n" + "\n".join(REPOS or ["(none found)"]))
+        "Git repos on this machine:\n" + "\n".join(find_repos() or ["(none found)"]))
 
 def chat_send(text, rows):
     with CHAT_LOCK: _chat_send(text, rows)
 
 def _chat_send(text, rows):
-    global CHAT_SID, CHAT_PROC, REPOS, CHAT_T0
+    global CHAT_SID, CHAT_PROC, CHAT_T0
     if text == "/clear":
         CHAT.clear(); CHAT_SID = None
         return
@@ -596,7 +699,6 @@ def _chat_send(text, rows):
         CHAT.append(("err", "still working on the previous request"))
         return
     import threading, uuid
-    if REPOS is None: REPOS = find_repos()
     os.makedirs(CHAT_DIR, exist_ok=True)
     live = "\n".join(f"- {r['name'] or r['sid'][:8]} · {r['status']} · {r['cwd']}" for r in rows if r["live"])
     prompt = f"<dashboard>\nLive Claude sessions (name · status · dir):\n{live or '- none'}\n</dashboard>\n\n{text}"
@@ -693,13 +795,11 @@ def server(port):
     import threading, secrets
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
     from urllib.parse import urlparse, parse_qs
-    root = os.path.dirname(os.path.realpath(os.environ.get("CS_SELF") or "."))
-    web = os.path.join(root, "web")
+    web = os.path.join(ROOT, "web")
     page = os.path.join(web, "index.html")
-    theme_cfg = os.path.join(root, ".theme-config.json")
     STATIC = {"/manifest.webmanifest": "application/manifest+json", "/sw.js": "text/javascript; charset=utf-8"}
     token = secrets.token_urlsafe(24)
-    cache, lock, tlock = {}, threading.Lock(), threading.Lock()
+    cache, lock = {}, threading.Lock()
 
     def sessions(ended, fresh=False):
         with lock:
@@ -710,13 +810,11 @@ def server(port):
             return rows
 
     def themes():
-        try: c = json.load(open(theme_cfg, encoding="utf-8"))
-        except (OSError, ValueError): c = {}
-        if not isinstance(c, dict): c = {}
+        c = settings()
         lst = [dict(id=str(t["id"]), title=str(t.get("title") or t["id"]), file=t["file"]) for t in c.get("themes") or []
                if isinstance(t, dict) and t.get("id") and re.fullmatch(r"[A-Za-z0-9_-]+\.css", str(t.get("file", "")))]
         lst = lst or [dict(id="terminal", title="Terminal", file="Terminal-theme.css")]
-        cur = next((t for t in lst if t["id"] == c.get("selected")), lst[0])
+        cur = next((t for t in lst if t["id"] == c.get("theme")), lst[0])
         return c, lst, cur
 
     def chat_state():
@@ -765,8 +863,8 @@ def server(port):
                 q = parse_qs(u.query)
                 rows = sessions(q.get("all") == ["1"], q.get("fresh") == ["1"])
                 _, lst, cur = themes()
-                return self.reply(200, dict(sessions=rows, usage=usage_data(), chat=chat_state(), now=time.time(),
-                    cfg=dict(themes=lst, theme=cur["id"], window=WINDOW, agent_rows=AGENT_ROWS, chat_rows=CHAT_ROWS, chat_model=CHAT_MODEL, home=os.path.expanduser("~"))))
+                return self.reply(200, dict(sessions=rows, usage=usage_data(), chat=chat_state(), now=time.time(), projects=projects(),
+                    cfg=dict(themes=lst, theme=cur["id"], projects=dict(dir=str(settings().get("projects") or "~/Projects"), env=bool(os.environ.get("CS_REPO_ROOTS"))), window=WINDOW, agent_rows=AGENT_ROWS, chat_rows=CHAT_ROWS, chat_model=CHAT_MODEL, home=os.path.expanduser("~"))))
             self.reply(404, {"error": "not found"})
 
         def do_POST(self):
@@ -783,19 +881,20 @@ def server(port):
                     row = next((r for _, rows in cache.values() for r in rows if r["sid"] == sid), None)
                 return self.reply(200, {"msg": focus(row) if row else "session not found"})
             if u.path == "/api/theme":
-                with tlock:
-                    c, lst, _ = themes()
-                    t = next((t for t in lst if t["id"] == body.get("id")), None)
-                    if not t: return self.reply(400, {"error": "unknown theme"})
-                    c["themes"] = c.get("themes") or lst
-                    c["selected"] = t["id"]
-                    tmp = theme_cfg + ".tmp"
-                    try:
-                        with open(tmp, "w", encoding="utf-8") as f: f.write(json.dumps(c, indent=2, ensure_ascii=False) + "\n")
-                        os.replace(tmp, theme_cfg)
-                    except OSError as e:
-                        return self.reply(500, {"error": f"cannot write {theme_cfg}: {e.strerror}"})
+                t = next((t for t in themes()[1] if t["id"] == body.get("id")), None)
+                if not t: return self.reply(400, {"error": "unknown theme"})
+                try: save_settings(theme=t["id"])
+                except OSError as e: return self.reply(500, {"error": f"cannot write {SETTINGS}: {e.strerror}"})
                 return self.reply(200, {"theme": t["id"]})
+            if u.path == "/api/open":
+                return self.reply(200, {"msg": open_project(str(body.get("path") or ""))})
+            if u.path == "/api/settings":
+                d = str(body.get("projects") or "").strip().rstrip("/") or "~/Projects"
+                if not all(os.path.isdir(os.path.expanduser(x.strip())) for x in d.split(":")):
+                    return self.reply(400, {"error": f"not a folder: {d}"})
+                try: save_settings(projects=d)
+                except OSError as e: return self.reply(500, {"error": f"cannot write {SETTINGS}: {e.strerror}"})
+                return self.reply(200, {"projects": d})
             if u.path == "/api/chat":
                 text = str(body.get("text") or "").strip()
                 if text: chat_send(text, sessions(False))
@@ -896,6 +995,7 @@ else:
         while True:
             if time.time() - last >= 2:
                 data = collect()
+                PROJ = projects()
                 last = time.time()
             if True:
                 FRAME += 1
@@ -905,7 +1005,9 @@ else:
                 lines = buf.getvalue().rstrip("\n").split("\n")
                 sz = shutil.get_terminal_size((120, 30))
                 h = sz.lines
-                if INPUT is None:
+                if PSEARCH is not None:
+                    hint = "\033[2m type to filter · ←→ select · enter open in VS Code · esc close \033[0m"
+                elif INPUT is None:
                     hint = "\033[2m ←↑↓→ select · enter/click focus · / chat · q quit · a " + ("hide ended" if show_all else "show ended") + " · r refresh" + (" · w " if WEB_URL else " ") + "\033[0m"
                 else:
                     hint = "\033[2m enter send · esc close chat · ctrl-u clear line · /clear new chat" + (" · " if WEB_URL else " ") + "\033[0m"
@@ -915,9 +1017,12 @@ else:
                     hint += f"\033[4;38;5;81m{WEB_LABEL}\033[0m"
                 if MSG[0] and time.time() - MSG[1] < 5: hint += "  \033[38;5;173m▸ " + MSG[0] + "\033[0m"
                 chat = chat_view(sz.columns)
-                bottom = chat + [usage_line(0), hint]
+                pline, hs = proj_view(sz.columns)
+                bottom = [pline] + chat + [usage_line(0), hint]
                 body = lines[:max(1, h - len(bottom) - 1)]
-                BODY_H, CHAT_Y = len(body), (h - len(bottom) + 1, h - 2)
+                PROJ_Y = h - len(bottom) + 1
+                PROJ_HITS = hs
+                BODY_H, CHAT_Y = len(body), (PROJ_Y + 1, h - 2)
                 out.write("\033[H" + "".join(l + "\033[K\n" for l in body) + "\033[J"
                     + "".join(f"\033[{h - len(bottom) + 1 + i};1H{l}\033[K" for i, l in enumerate(bottom)))
                 out.flush()
@@ -936,6 +1041,19 @@ else:
                     else: events.append(("key", m.group(3)))
                 done = False
                 for ev in events:
+                    if PSEARCH is not None and ev[0] != "click":
+                        k = ev[1] if ev[0] == "key" else ""
+                        found = proj_match(PSEARCH, PROJ)
+                        if ev[0] == "arrow": PSEL = max(0, min(len(found) - 1, PSEL + (1 if ev[1] in "BC" else -1)))
+                        elif k == "\x03": done = True
+                        elif k in ("\x1b", "\t"): PSEARCH = None
+                        elif k in ("\r", "\n"):
+                            if found: MSG = (open_project(found[min(PSEL, len(found) - 1)]["path"]), time.time())
+                            PSEARCH = None
+                        elif k in ("\x7f", "\x08"): PSEARCH, PSEL = PSEARCH[:-1], 0
+                        elif k == "\x15": PSEARCH, PSEL = "", 0
+                        elif k.isprintable(): PSEARCH, PSEL = PSEARCH + k, 0
+                        continue
                     if INPUT is not None and ev[0] != "click":
                         k = ev[1] if ev[0] == "key" else ""
                         if k == "\x03": done = True
@@ -951,6 +1069,12 @@ else:
                         if WEB_HIT and ev[2] == WEB_HIT[0] and WEB_HIT[1] <= ev[1] <= WEB_HIT[2]:
                             open_web()
                             continue
+                        if ev[2] == PROJ_Y:
+                            hit = next((x[2] for x in PROJ_HITS if x[0] <= ev[1] <= x[1]), None)
+                            if hit: MSG, PSEARCH = (open_project(hit), time.time()), None
+                            elif PSEARCH is None: PSEARCH, PSEL, INPUT = "", 0, None
+                            continue
+                        PSEARCH = None
                         if CHAT_Y[0] <= ev[2] <= CHAT_Y[1]:
                             INPUT = INPUT or ""
                             continue
@@ -973,6 +1097,7 @@ else:
                         if k in ("q", "Q", "\x03"): done = True
                         elif k == "\x1b": done = True
                         elif k in ("/", "\t"): INPUT = ""
+                        elif k in ("p", "P"): PSEARCH, PSEL = "", 0
                         elif k in ("a", "A"): show_all = not show_all; last = 0
                         elif k in ("r", "R"): last = 0
                         elif k in ("w", "W"):

@@ -162,6 +162,26 @@ b, .b { font-weight: 700; }
 
 /* dock */
 .dock { flex: none; padding: 6px 20px 10px; }
+/* projects bar */
+.projects { display: flex; align-items: center; gap: 4px 14px; min-width: 0; }
+.proj-label { color: var(--dim); flex: none; }
+.proj-list { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 0 14px; height: 1.45em; overflow: hidden; }
+.proj { font: inherit; color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; white-space: nowrap; }
+.proj:hover, .proj:focus-visible { color: var(--orange); text-decoration: underline; outline: 0; }
+.proj-find { position: relative; flex: none; width: 24ch; }
+#projQ { width: 100%; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--gray); border-radius: 4px; padding: 1px 6px; outline: 0; caret-color: var(--orange); }
+#projQ:focus { border-color: var(--orange); }
+#projQ::placeholder { color: var(--dim); }
+.proj-menu { position: absolute; right: 0; bottom: calc(100% + 6px); width: min(56ch, 90vw); z-index: 5; background: var(--bg); border: 1px solid var(--orange); border-radius: 6px; padding: 4px 0; }
+.proj-opt { display: flex; justify-content: space-between; gap: 16px; padding: 1px 10px; cursor: pointer; white-space: nowrap; }
+.proj-opt .n { flex: none; max-width: 65%; overflow: hidden; text-overflow: ellipsis; }
+.proj-opt .r { flex: 1; min-width: 0; text-align: right; color: var(--dim); overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+.proj-opt.on, .proj-opt:hover { background: var(--ubg); }
+.proj-opt.on .n { color: var(--orange); font-weight: 700; }
+.proj-none { color: var(--dim); padding: 1px 10px; }
+.proj-dir { flex: none; max-width: 30ch; font: inherit; color: var(--dim); background: none; border: 0; padding: 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj-dir:hover, .proj-dir:focus-visible { color: var(--fg); text-decoration: underline; outline: 0; }
+.proj-dir-in { flex: none; width: 30ch; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--orange); border-radius: 4px; padding: 1px 6px; outline: 0; }
 .chat { position: relative; border: 1px solid var(--gray); border-radius: 10px; padding: 14px 16px 8px; margin-top: 12px; cursor: text; transition: border-color .2s; }
 .chat.on { border-color: var(--orange); }
 .chat-head { position: absolute; top: -.75em; left: 12px; right: 12px; display: flex; justify-content: space-between; gap: 12px; pointer-events: none; }
@@ -195,6 +215,8 @@ b, .b { font-weight: 700; }
 kbd { font: inherit; color: var(--fg); }
 
 @media (max-width: 640px) {
+  .proj-label, .proj-dir { display: none; }
+  .proj-find { width: 140px; }
   .top, .body, .dock { padding-left: 16px; padding-right: 16px; }
   .tile { padding: 20px 16px 14px; }
 }
