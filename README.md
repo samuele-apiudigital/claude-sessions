@@ -22,12 +22,31 @@ Requires `python3` (stdlib only). Run `cs`.
 | `cs -a`   | also show sessions ended in the last 24h     |
 | `cs -t`   | classic table layout                         |
 | `cs -j`   | JSON output                                  |
+| `cs -s`   | web dashboard on http://127.0.0.1:7421       |
 
 Keys: arrows select, Enter or click focuses the session's app, `/` opens the chat,
 `a` toggles ended sessions, `r` refreshes, `q`/Esc quits.
 
 Focus works for VS Code (window of the session's folder), Terminal.app and iTerm2
 (exact tab by tty). Other terminals (e.g. Warp) are only brought to the front.
+
+## Web dashboard
+
+`cs -s` serves the same dashboard as a web page: tiles, agents, context bars, usage limits
+bar and the chat, refreshed every 2s. It listens on `127.0.0.1:7421` (or the first free port
+if that one is taken); `cs -s 8080` or `CS_PORT=8080 cs -s` uses a fixed port. The page lives in
+`web/index.html` and is re-read on every load.
+
+Keys: arrows select, Enter or click focuses the session's app, `/` opens the chat (Esc closes),
+`a` toggles ended sessions, `t` switches between tiles and the table layout, `r` refreshes.
+
+It can be installed as an app (its own window and Dock icon): press `i`, or use the install
+button in Chrome's address bar; in Safari use File › Add to Dock. The app needs `cs -s`
+running on the same port; while the server is down it shows the last page as offline and
+reloads itself when the server is back.
+
+It only accepts requests addressed to `127.0.0.1`/`localhost` that carry a token generated at
+startup, so other websites can't drive the chat (which runs with permissions bypassed).
 
 ## Chat
 

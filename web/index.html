@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude sessions</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-title" content="Sessions">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #121212;
+  --fg: #dadada;
+  --dim: #828282;
+  --mid: #8a8a8a;
+  --gray: #585858;
+  --track: #2c2c2c;
+  --ubg: #2a2a2a;
+  --orange: #d7875f;
+  --green: #87d787;
+  --amber: #d7af5f;
+  --red: #d75f5f;
+  --wait: #a8a8a8;
+  --violet: #af87ff;
+  --cyan: #5fd7ff;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f4f4f5;
+    --fg: #1d1d20;
+    --dim: #67676d;
+    --mid: #6e6e73;
+    --gray: #a1a1aa;
+    --track: #e1e1e5;
+    --ubg: #e6e6ea;
+    --orange: #bd5a29;
+    --green: #2c7f3f;
+    --amber: #8f6710;
+    --red: #bf3b34;
+    --wait: #66666c;
+    --violet: #6a4bcf;
+    --cyan: #11789c;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+.app { display: flex; flex-direction: column; height: 100dvh; }
+.dim { color: var(--dim); }
+.o { color: var(--orange); }
+b, .b { font-weight: 700; }
+
+/* header */
+.top { flex: none; padding: 14px 20px 10px; display: flex; flex-wrap: wrap; gap: 4px 20px; align-items: baseline; }
+.brand { color: var(--orange); font-weight: 700; }
+.count .dot { margin-right: 6px; }
+
+/* body */
+.body { flex: 1; overflow: auto; padding: 14px 20px 8px; outline: none; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 22px 14px; }
+.note { margin: 14px 0 0; color: var(--dim); }
+.empty { color: var(--dim); padding: 28px 4px; }
+.empty b { color: var(--fg); }
+
+/* tile */
+.tile {
+  --sc: var(--amber);
+  position: relative; min-width: 0;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--sc); border-radius: 10px;
+  padding: 20px 22px 16px;
+  cursor: pointer;
+  transition: outline-color .2s, transform .15s cubic-bezier(.16, 1, .3, 1);
+  outline: 1px solid transparent; outline-offset: 3px;
+}
+.tile.s-busy { --sc: var(--orange); }
+.tile.s-idle { --sc: var(--wait); }
+.tile.s-ended { --sc: var(--gray); }
+.tile.sel { outline-color: var(--sc); }
+.tile:active { transform: scale(.995); }
+.tile .tag {
+  position: absolute; top: -.75em; left: 12px; z-index: 1;
+  padding: 0 7px; background: var(--bg); color: var(--dim);
+  max-width: calc(100% - 24px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tile.sel .tag { color: var(--fg); font-weight: 700; }
+.edge { position: absolute; top: -1px; left: 10px; right: 10px; height: 1px; overflow: hidden; pointer-events: none; }
+.edge i {
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 0 86%, var(--fg) 86% 100%);
+  animation: sweep 1.8s linear infinite;
+}
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+.hd { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 6px; }
+.logo { margin: 0; grid-row: span 3; color: var(--orange); font: inherit; line-height: inherit; white-space: pre; }
+.logo.rainbow {
+  background: linear-gradient(90deg, #ff0000, #ff8700, #ffd700, #5fff00, #00d7ff, #5f5fff, #d75fff, #ff0000);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: rainbow 2.4s linear infinite;
+}
+@keyframes rainbow { from { background-position: 0 0; } to { background-position: -200% 0; } }
+.name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st { color: var(--sc); }
+.st b { letter-spacing: .02em; }
+
+.kv { display: grid; grid-template-columns: 5ch minmax(0, 1fr); margin: 14px 0 0; }
+.kv dt { color: var(--dim); }
+.kv dd { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kv dd.path { direction: rtl; text-align: left; }
+.cy { color: var(--cyan); }
+
+.agents { margin-top: 14px; }
+.agents .grid { display: grid; grid-template-columns: 2ch minmax(0, max-content) minmax(0, 1fr) minmax(0, max-content); column-gap: 8px; }
+.agents .grid > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agents .ty { max-width: 10ch; }
+.agents .on { color: var(--violet); }
+.agents .right { color: var(--dim); max-width: 22ch; text-align: right; }
+.agents .more { color: var(--dim); padding-left: 2ch; }
+
+.ctx { margin-top: auto; padding-top: 16px; }
+.ctx .line { display: flex; justify-content: space-between; gap: 8px; }
+.bar { height: 9px; margin-top: 4px; background: var(--track); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--bc); border-radius: 2px; transition: width .4s cubic-bezier(.16, 1, .3, 1); }
+.meta { margin-top: 14px; }
+.pairs { display: grid; grid-template-columns: 1fr 1fr; }
+.pairs span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* table view */
+.tbl { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.tbl th { text-align: left; font-weight: 700; padding: 0 14px 6px 0; }
+.tbl td { padding: 3px 14px 3px 0; }
+.tbl .num { text-align: right; }
+.tbl tbody tr { cursor: pointer; }
+.tbl tbody tr:hover td { color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.tbl tr.sel td { background: color-mix(in srgb, var(--orange) 14%, transparent); }
+.tbl .label { max-width: 40ch; overflow: hidden; text-overflow: ellipsis; }
+.tbl-wrap { overflow-x: auto; }
+
+/* dock */
+.dock { flex: none; padding: 6px 20px 10px; }
+.chat { position: relative; border: 1px solid var(--gray); border-radius: 10px; padding: 14px 16px 8px; margin-top: 12px; cursor: text; transition: border-color .2s; }
+.chat.on { border-color: var(--orange); }
+.chat-head { position: absolute; top: -.75em; left: 12px; right: 12px; display: flex; justify-content: space-between; gap: 12px; pointer-events: none; }
+.chat-head span { background: var(--bg); padding: 0 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-title { color: var(--orange); font-weight: 700; flex: none; }
+.chat-side { color: var(--dim); }
+.chat-log { overflow-y: auto; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--gray); }
+.chat-log[hidden] { display: none; }
+.chat.on .chat-log { border-bottom-color: color-mix(in srgb, var(--orange) 55%, transparent); }
+.msg { display: grid; grid-template-columns: 2ch minmax(0, 1fr); column-gap: 4px; }
+.msg.you { background: var(--ubg); border-radius: 4px; padding: 1px 6px 1px 4px; margin: 3px 0; }
+.msg.claude .g { color: var(--orange); }
+.msg.err { color: var(--red); }
+.msg.tool { color: var(--mid); padding-left: 2ch; }
+.msg.tool .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg.tool .g { color: var(--gray); }
+.working { color: var(--orange); }
+.chat-field { display: flex; align-items: center; gap: 8px; }
+.chat-field .p { color: var(--gray); font-weight: 700; }
+.chat.on .chat-field .p { color: var(--orange); }
+#ask {
+  flex: 1; min-width: 0; border: 0; outline: 0; padding: 2px 0;
+  background: transparent; color: var(--fg); font: inherit; font-weight: 700; caret-color: var(--orange);
+}
+#ask::placeholder { color: var(--dim); font-weight: 400; }
+.usage { margin-top: 8px; white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+.usage .track { color: var(--gray); }
+.usage .sep { color: var(--dim); padding: 0 12px; }
+.hint { color: var(--dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hint .flash { color: var(--orange); margin-left: 12px; }
+.hint .off { color: var(--red); margin-left: 12px; }
+kbd { font: inherit; color: var(--fg); }
+
+@media (max-width: 640px) {
+  .top, .body, .dock { padding-left: 16px; padding-right: 16px; }
+  .tile { padding: 20px 16px 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .edge i, .logo.rainbow { animation: none; }
+  .tile, .bar i, .chat { transition: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top" id="head"><span class="brand">✻ Claude sessions</span></header>
+  <main class="body" id="main">
+    <div class="tiles" id="tiles"></div>
+    <div class="tbl-wrap" id="table" hidden></div>
+    <p class="empty" id="empty">Loading sessions…</p>
+    <p class="note" id="note"></p>
+  </main>
+  <footer class="dock">
+    <section class="chat" id="chat" aria-label="Ask Claude">
+      <div class="chat-head"><span class="chat-title">✻ Ask Claude</span><span class="chat-side" id="chatSide"></span></div>
+      <div class="chat-log" id="chatLog" hidden></div>
+      <div class="chat-field"><span class="p">❯</span><input id="ask" autocomplete="off" spellcheck="false" aria-label="Ask Claude"></div>
+    </section>
+    <div class="usage" id="usage"></div>
+    <div class="hint" id="hint"></div>
+  </footer>
+</div>
+<script>
+"use strict";
+const TOKEN = "__CS_TOKEN__";
+const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", STAR = "·✢✳✶✻✽✻✶✳✢";
+const LOGO = [" ▐▛███▜▌  ", "▝▜█████▛▘ ", "  ▘▘ ▝▝   "];
+const LEGS_B = "   ▝▝ ▘▘  ";
+const TIP = "open a repo in VS Code, show it in Finder…";
+const SHORT = { "general-purpose": "general", "claude-code-guide": "guide", "statusline-setup": "statusline" };
+const RM = matchMedia("(prefers-reduced-motion: reduce)");
+const $ = id => document.getElementById(id);
+const ask = $("ask");
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+let S = null;
+let sel = null;
+let showAll = store.get("cs.all") === "1";
+let view = store.get("cs.view") === "table" ? "table" : "tiles";
+let flash = ["", 0];
+let offline = false;
+let FRAME = 0;
+let lastPoll = 0, polling = false, chatSig = "";
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const one = s => String(s ?? "").split(/\s+/).filter(Boolean).join(" ");
+const p2 = n => String(n).padStart(2, "0");
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n);
+const nowS = () => Date.now() / 1000;
+function ago(ms) {
+  const s = Math.max(0, Math.floor(nowS() - ms / 1000));
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h${p2(Math.floor(s % 3600 / 60))}m` : `${Math.floor(s / 86400)}d`;
+}
+function dur(sec) {
+  sec = Math.floor(Math.max(0, sec));
+  return sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${p2(sec % 60)}s` : `${Math.floor(sec / 3600)}h${p2(Math.floor(sec % 3600 / 60))}m`;
+}
+function rem(sec) {
+  sec = Math.floor(Math.max(0, sec));
+  const dd = Math.floor(sec / 86400), hh = Math.floor(sec % 86400 / 3600), mm = Math.floor(sec % 3600 / 60);
+  return dd ? `${dd}d${hh}h` : hh ? `${hh}h${p2(mm)}m` : `${mm}m`;
+}
+const win = r => S.cfg.window || (r.peak > 200000 ? 1000000 : 200000);
+const home = p => { const h = S.cfg.home; return p && h && p.startsWith(h) ? "~" + p.slice(h.length) : p || ""; };
+const pctColor = p => p >= 85 ? "var(--red)" : p >= 60 ? "var(--amber)" : "var(--green)";
+
+function stateOf(r) {
+  if (r.status === "busy") return ["RUNNING", "s-busy"];
+  if (r.status === "idle") return ["WAITING", "s-idle"];
+  if (r.status === "ended") return ["ENDED", "s-ended"];
+  return [String(r.status).toUpperCase(), "s-other"];
+}
+
+function agentCounts(r) {
+  const ags = r.agents || [];
+  const running = ags.filter(a => a.state === "running").sort((a, b) => (a.t0 || 0) - (b.t0 || 0));
+  const nrun = running.reduce((s, a) => s + (a.kind === "workflow" ? (a.nrun || 1) : 1), 0);
+  const ndone = ags.reduce((s, a) => s + (a.kind === "workflow" ? (a.ndone || 0) : a.state !== "running" ? 1 : 0), 0);
+  return { running, nrun, ndone };
+}
+
+function agentBlock(r) {
+  const ags = r.agents || [];
+  if (!ags.length) return "";
+  const now = nowS();
+  const { running, nrun, ndone } = agentCounts(r);
+  const recent = ags.filter(a => !["running", "lost"].includes(a.state) && a.t1 && now - a.t1 < 60).sort((a, b) => b.t1 - a.t1);
+  let show = running.concat(recent), more = 0;
+  const max = S.cfg.agent_rows;
+  if (show.length > max) { more = show.length - max + 1; show = show.slice(0, max - 1); }
+  let h = `<div class="agents"><div><span class="dim">AGENTS</span>`
+    + (nrun ? ` <b class="o">${nrun}</b> <span class="dim">running</span>` : "")
+    + (nrun && ndone ? ` <span class="dim">·</span>` : "")
+    + (ndone ? ` ${ndone} <span class="dim">done</span>` : "") + `</div><div class="grid">`;
+  show.forEach((a, k) => {
+    const on = a.state === "running";
+    let ic, right;
+    if (on) {
+      ic = `<span class="o" data-spin="${k}">${SPIN[(FRAME + k * 3) % 10]}</span>`;
+      const act = a.kind === "workflow" ? `${a.phase || "running"} ${a.ndone}/${a.ndone + a.nrun}` : a.act || "starting";
+      right = `${act} ${dur(now - (a.t0 || now))}`;
+    } else {
+      ic = a.state === "completed" ? `<span style="color:var(--wait)">✓</span>` : a.state === "failed" ? `<span style="color:var(--red)">✗</span>` : `<span style="color:var(--gray)">■</span>`;
+      right = `${a.state === "completed" ? "done" : a.state} ${dur(a.t1 - (a.t0 || a.t1))}`;
+    }
+    const ty = SHORT[a.type] || a.type;
+    const desc = one(a.desc) || "-";
+    h += `<span>${ic}</span><span class="ty ${on ? "on" : "dim"}">${esc(ty)}</span>`
+      + `<span class="${on ? "" : "dim"}" title="${esc(desc)}">${esc(desc)}</span><span class="right" title="${esc(right)}">${esc(right)}</span>`;
+  });
+  h += `</div>`;
+  if (more) h += `<div class="more">+${more} more</div>`;
+  return h + `</div>`;
+}
+
+function tileHTML(r) {
+  const [label, cls] = stateOf(r);
+  const busy = r.status === "busy";
+  const w = win(r);
+  const pct = Math.min(100, r.ctx / w * 100);
+  const bc = pct >= 85 ? "var(--red)" : pct >= 60 ? "var(--amber)" : "var(--sc)";
+  const ent = { "claude-vscode": "VS Code", cli: "CLI" }[r.entry] ?? (r.entry || "");
+  const tag = r.pid ? `#${r.pid}` + (ent ? ` · ${ent}` : "") : "transcript";
+  const wd = home(r.cwd);
+  const br = r.branch && r.branch !== "HEAD" ? r.branch : "";
+  let task;
+  if (busy) {
+    const tt = one(r.cur_task || r.prompt);
+    task = tt ? `<span class="o">▶</span> <span title="${esc(tt)}">${esc(tt)}</span>` : `<span class="dim">working…</span>`;
+  } else {
+    const tt = one(r.done_task || r.prompt);
+    task = tt ? `<span style="color:var(--wait)">✓</span> <span class="dim" title="${esc(tt)}">${esc(tt)}</span>` : `<span class="dim">-</span>`;
+  }
+  const rainbow = r.ultra && r.live;
+  const pair = (l1, v1, l2, v2) => `<span><span class="dim">${l1}</span> ${esc(v1)}</span><span><span class="dim">${l2}</span> ${esc(v2)}</span>`;
+  return `<article class="tile ${cls}${r.sid === sel ? " sel" : ""}" data-key="${esc(r.sid)}" data-sid="${esc(r.sid)}">`
+    + (busy ? `<div class="edge"><i></i></div>` : "")
+    + `<div class="tag" title="${esc(r.sid)}">${esc(tag)}</div>`
+    + `<div class="hd"><pre class="logo${rainbow ? " rainbow" : ""}">${LOGO[0]}\n${LOGO[1]}\n<span${busy ? " data-legs" : ""}>${LOGO[2]}</span></pre>`
+    + `<div class="name" title="${esc(r.name || r.sid)}">${esc(r.name || r.sid.slice(0, 8))}</div>`
+    + `<div class="st"><span${busy ? " data-pulse" : ""}>●</span> <b>${esc(label)}</b>${busy ? ` <span data-spin="0">${SPIN[FRAME % 10]}</span>` : ""}</div></div>`
+    + `<dl class="kv"><dt>dir</dt><dd class="path" title="${esc(wd)}">&lrm;${esc(wd)}&lrm;</dd>`
+    + `<dt>git</dt><dd>${br ? `<span class="cy">${esc(br)}</span>` : `<span class="dim">none</span>`}</dd>`
+    + `<dt>task</dt><dd>${task}</dd></dl>`
+    + agentBlock(r)
+    + `<div class="ctx" style="--bc:${bc}"><div class="line"><span><span class="dim">CONTEXT</span> ${fmt(r.ctx)}<span class="dim">/${fmt(w)}</span></span>`
+    + `<b style="color:var(--bc)">${pct.toFixed(0)}%</b></div><div class="bar"><i style="width:${pct.toFixed(2)}%"></i></div></div>`
+    + `<div class="meta"><div><span class="dim">MODEL</span> ${esc(String(r.model).replace("claude-", ""))}</div>`
+    + `<div class="pairs">${pair("turns", r.turns, "tools", r.tools)}${pair("out", fmt(r.out), "cache", fmt(r.cread))}`
+    + `${pair("up", r.uptime, "idle", r.updated ? ago(r.updated) : "-")}</div></div></article>`;
+}
+
+function tableHTML(rows) {
+  let h = `<table class="tbl"><thead><tr><th>PID</th><th>STATUS</th><th>CONTEXT</th><th>MODEL</th><th class="num">TURNS</th><th class="num">TOOLS</th>`
+    + `<th class="num">OUT</th><th class="num">CACHE-R</th><th class="num">UP</th><th class="num">IDLE</th><th>SESSION</th></tr></thead><tbody>`;
+  for (const r of rows) {
+    const pct = r.ctx / win(r) * 100;
+    const fill = Math.min(10, Math.round(pct / 100 * 10));
+    const c = pct >= 85 ? "var(--red)" : pct >= 60 ? "var(--amber)" : "var(--green)";
+    const sc = r.status === "busy" ? "var(--green)" : r.status === "idle" ? "var(--amber)" : "var(--dim)";
+    const proj = String(r.cwd).replace(/\/+$/, "").split("/").pop() || r.cwd;
+    const nag = agentCounts(r).nrun;
+    h += `<tr data-sid="${esc(r.sid)}"${r.sid === sel ? ` class="sel"` : ""}><td>${esc(r.pid || "-")}</td><td style="color:${sc}">${esc(r.status)}</td>`
+      + `<td><span style="color:${c}">${"█".repeat(fill)}</span><span class="dim">${"░".repeat(Math.max(0, 10 - fill))}</span> ${fmt(r.ctx).padStart(5, " ")} ${pct.toFixed(0).padStart(3, " ")}%</td>`
+      + `<td>${esc(String(r.model).replace("claude-", ""))}</td><td class="num">${r.turns}</td><td class="num">${r.tools}</td>`
+      + `<td class="num">${fmt(r.out)}</td><td class="num">${fmt(r.cread)}</td><td class="num">${esc(r.uptime)}</td>`
+      + `<td class="num">${r.updated ? ago(r.updated) : "-"}</td>`
+      + `<td class="label">${esc(r.name || r.title || r.sid.slice(0, 8))} <span class="dim">[${esc(proj)}]</span>`
+      + (nag ? ` <span style="color:var(--amber)">· ${nag} agent${nag !== 1 ? "s" : ""}</span>` : "") + `</td></tr>`;
+  }
+  const live = rows.filter(r => r.live).length;
+  return h + `</tbody></table><p class="note">${live} live / ${rows.length} shown</p>`;
+}
+
+function headHTML(rows) {
+  const live = rows.filter(r => r.live);
+  const nrun = live.filter(r => r.status === "busy").length;
+  const nwait = live.filter(r => r.status === "idle").length;
+  const nother = live.length - nrun - nwait;
+  const nag = live.reduce((s, r) => s + agentCounts(r).nrun, 0);
+  const d = new Date();
+  return `<span class="brand">✻ Claude sessions</span>`
+    + `<span class="count"><span class="dot o">●</span>${nrun} running</span>`
+    + `<span class="count"><span class="dot" style="color:var(--wait)">●</span>${nwait} waiting</span>`
+    + (nother ? `<span class="count"><span class="dot" style="color:var(--amber)">●</span>${nother} other</span>` : "")
+    + (nag ? `<span class="count"><span class="dot" style="color:var(--violet)">◆</span>${nag} agent${nag !== 1 ? "s" : ""}</span>` : "")
+    + `<span class="dim">${fmt(live.reduce((s, r) => s + r.ctx, 0))} context · ${fmt(rows.reduce((s, r) => s + r.out, 0))} output · ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}</span>`;
+}
+
+function usageHTML(d) {
+  if (!d) return `<span class="dim">usage limits: no data yet (appears after the next status line refresh)</span>`;
+  const rl = d.rate_limits || {}, now = nowS(), parts = [];
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const at = (t, long) => { const x = new Date(t * 1000); return (long ? DAYS[x.getDay()] + " " : "") + `${p2(x.getHours())}:${p2(x.getMinutes())}`; };
+  for (const [key, lab, long] of [["five_hour", "5h", false], ["seven_day", "7d", true]]) {
+    const w = rl[key];
+    if (!w) continue;
+    const pct = Number(w.used_percentage) || 0, rs = w.resets_at;
+    if (rs && rs < now) { parts.push(`<b>${lab}</b> <span class="dim">window reset</span>`); continue; }
+    const n = 14, f = Math.min(n, Math.round(pct / 100 * n)), c = pctColor(pct);
+    const when = rs ? ` <span class="dim">resets</span> ${at(rs, long)} <span class="dim">(in ${rem(rs - now)})</span>` : "";
+    parts.push(`<b>${lab}</b> <span style="color:${c}">${"█".repeat(f)}</span><span class="track">${"░".repeat(n - f)}</span> <b style="color:${c}">${pct.toFixed(0)}%</b>${when}`);
+  }
+  if (!parts.length) return `<span class="dim">usage limits: n/a</span>`;
+  const sep = `<span class="sep">│</span>`;
+  return parts.join(sep) + sep + `<span class="dim">updated ${rem(now - (d.ts ?? now))} ago</span>`;
+}
+
+function chatHTML() {
+  const h = S.cfg.home;
+  let out = "";
+  for (const [kind, text] of S.chat.log) {
+    if (kind === "tool") {
+      let cmd = String(text).split("\n")[0];
+      if (h) cmd = cmd.split(h).join("~");
+      out += `<div class="msg tool"><span class="g">⎿</span><span class="t" title="${esc(cmd)}">${esc(cmd)}</span></div>`;
+    } else {
+      const g = kind === "you" ? "›" : kind === "claude" ? "⏺" : "✗";
+      out += `<div class="msg ${kind === "you" || kind === "claude" ? kind : "err"}"><span class="g">${g}</span><span>${esc(one(text))}</span></div>`;
+    }
+  }
+  if (S.chat.working) out += `<div class="working"><span data-star>${STAR[FRAME % 10]}</span> Working… <span class="dim">${Math.max(0, Math.floor(nowS() - S.chat.t0))}s</span></div>`;
+  return out;
+}
+
+function patch(box, items) {
+  const old = new Map([...box.children].map(el => [el.dataset.key, el]));
+  let prev = null;
+  for (const { key, html } of items) {
+    let el = old.get(key);
+    old.delete(key);
+    if (!el || el._html !== html) {
+      const t = document.createElement("template");
+      t.innerHTML = html;
+      const n = t.content.firstElementChild;
+      n._html = html;
+      syncAnim(n);
+      if (el) el.replaceWith(n);
+      el = n;
+    }
+    const want = prev ? prev.nextElementSibling : box.firstElementChild;
+    if (el !== want) box.insertBefore(el, want);
+    prev = el;
+  }
+  old.forEach(el => el.remove());
+}
+
+function syncAnim(el) {
+  const t = performance.now();
+  el.querySelectorAll(".edge i").forEach(x => x.style.animationDelay = `-${t % 1800}ms`);
+  el.querySelectorAll(".logo.rainbow").forEach(x => x.style.animationDelay = `-${t % 2400}ms`);
+}
+
+function chatOn() { return document.activeElement === ask; }
+
+function render() {
+  if (!S) { renderHint(); return; }
+  const rows = S.sessions;
+  $("head").innerHTML = headHTML(rows);
+  const empty = $("empty");
+  empty.hidden = rows.length > 0;
+  if (!rows.length) empty.innerHTML = showAll ? `No sessions in the last 24h.` : `No live Claude sessions. Press <b>a</b> to include sessions ended in the last 24h.`;
+  $("tiles").hidden = view !== "tiles";
+  $("table").hidden = view !== "table";
+  if (view === "tiles") patch($("tiles"), rows.map(r => ({ key: r.sid, html: tileHTML(r) })));
+  else {
+    const html = tableHTML(rows);
+    if ($("table")._html !== html) { $("table").innerHTML = html; $("table")._html = html; }
+  }
+  $("note").textContent = `ctx = last request input · window ${S.cfg.window ? "$CLAUDE_CTX_WINDOW" : "200k, 1M if peak>200k"}`;
+  $("usage").innerHTML = usageHTML(S.usage);
+
+  const on = chatOn();
+  $("chat").classList.toggle("on", on);
+  $("chatSide").textContent = `${S.cfg.chat_model} · ${on ? "enter send · esc close" : "/ to type"}`;
+  ask.placeholder = on ? TIP : `press / to ask Claude · ${TIP}`;
+  const log = $("chatLog");
+  const sig = JSON.stringify([S.chat.log, S.chat.working, S.chat.working && Math.floor(nowS() - S.chat.t0)]);
+  if (sig !== chatSig) {
+    const grew = S.chat.log.length + S.chat.working !== (log._n || 0);
+    const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+    log.innerHTML = chatHTML();
+    log.hidden = !log.innerHTML;
+    log.style.maxHeight = `calc(${S.cfg.chat_rows} * 1.45em + 4px)`;
+    log._n = S.chat.log.length + S.chat.working;
+    if (grew || atEnd) log.scrollTop = log.scrollHeight;
+    chatSig = sig;
+  }
+  renderHint();
+}
+
+function renderHint() {
+  const keys = chatOn()
+    ? "enter send · esc close chat · ctrl-u clear line · /clear new chat"
+    : `←↑↓→ select · enter/click focus · / chat · a ${showAll ? "hide ended" : "show ended"} · t ${view === "tiles" ? "table" : "tiles"} · r refresh${installPrompt ? " · i install app" : ""}`;
+  let h = esc(keys);
+  if (flash[0] && Date.now() - flash[1] < 5000) h += `<span class="flash">▸ ${esc(flash[0])}</span>`;
+  if (offline) h += `<span class="off">✗ server not reachable, retrying…</span>`;
+  $("hint").innerHTML = h;
+}
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined
+    ? { headers: { "X-CS-Token": TOKEN } }
+    : { method: "POST", headers: { "X-CS-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 403) reloadForToken();
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function reloadForToken() {
+  let last = 0;
+  try { last = Number(sessionStorage.getItem("cs.reload")) || 0; } catch {}
+  if (Date.now() - last < 15000) return;
+  try { sessionStorage.setItem("cs.reload", String(Date.now())); } catch {}
+  location.reload();
+}
+
+let installPrompt = null;
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installPrompt = e; renderHint(); });
+addEventListener("appinstalled", () => { installPrompt = null; flash = ["installed as an app", Date.now()]; renderHint(); });
+async function install() {
+  if (!installPrompt) { flash = ["already installed, or use the browser's install button", Date.now()]; renderHint(); return; }
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  renderHint();
+}
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+async function poll(fresh) {
+  if (polling) return;
+  polling = true;
+  lastPoll = Date.now();
+  try {
+    S = await api(`/api/state?all=${showAll ? 1 : 0}${fresh ? "&fresh=1" : ""}`);
+    offline = false;
+    if (sel && !S.sessions.some(r => r.sid === sel)) sel = null;
+  } catch {
+    offline = true;
+  } finally {
+    polling = false;
+  }
+  render();
+}
+
+async function focusSel() {
+  if (!sel) { flash = ["select a session with the arrow keys first", Date.now()]; renderHint(); return; }
+  try { flash = [(await api("/api/focus", { sid: sel })).msg, Date.now()]; }
+  catch (e) { flash = [`focus failed: ${e.message}`, Date.now()]; }
+  render();
+}
+
+async function send(text) {
+  if (!text) return;
+  try { S.chat = await api("/api/chat", { text }); }
+  catch (e) { S.chat.log.push(["err", `cannot reach the server: ${e.message}`]); }
+  render();
+  poll();
+}
+
+function move(key) {
+  const rows = S?.sessions || [];
+  if (!rows.length) return;
+  const ids = rows.map(r => r.sid);
+  let cur = ids.indexOf(sel);
+  let per = 1;
+  if (view === "tiles") {
+    const tiles = [...$("tiles").children];
+    per = Math.max(1, tiles.filter(t => t.offsetTop === tiles[0].offsetTop).length);
+  }
+  const d = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: per, ArrowUp: -per }[key];
+  cur = cur < 0 ? 0 : Math.min(ids.length - 1, Math.max(0, cur + d));
+  sel = ids[cur];
+  render();
+  document.querySelector(`[data-sid="${CSS.escape(sel)}"]`)?.scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("keydown", e => {
+  if (e.target === ask || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (k.startsWith("Arrow")) { e.preventDefault(); move(k); }
+  else if (k === "Enter" || k === " ") { e.preventDefault(); focusSel(); }
+  else if (k === "/") { e.preventDefault(); ask.focus(); }
+  else if (k === "a" || k === "A") { showAll = !showAll; store.set("cs.all", showAll ? "1" : "0"); render(); poll(true); }
+  else if (k === "r" || k === "R") poll(true);
+  else if (k === "i" || k === "I") install();
+  else if (k === "t" || k === "T") { view = view === "tiles" ? "table" : "tiles"; store.set("cs.view", view); render(); }
+});
+
+ask.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); const t = ask.value.trim(); ask.value = ""; send(t); }
+  else if (e.key === "Escape") { e.preventDefault(); ask.blur(); }
+  else if (e.ctrlKey && (e.key === "u" || e.key === "U")) { e.preventDefault(); ask.value = ""; }
+});
+ask.addEventListener("focus", render);
+ask.addEventListener("blur", render);
+$("chat").addEventListener("mousedown", e => { if (e.target !== ask) { e.preventDefault(); ask.focus(); } });
+
+function pick(e) {
+  const el = e.target.closest("[data-sid]");
+  if (!el) return;
+  sel = el.dataset.sid;
+  render();
+  focusSel();
+}
+$("tiles").addEventListener("click", pick);
+$("table").addEventListener("click", pick);
+
+setInterval(() => {
+  if (RM.matches) return;
+  FRAME++;
+  document.querySelectorAll("[data-spin]").forEach(el => el.textContent = SPIN[(FRAME + 3 * Number(el.dataset.spin)) % 10]);
+  document.querySelectorAll("[data-pulse]").forEach(el => el.textContent = Math.floor(FRAME / 4) % 2 ? "○" : "●");
+  document.querySelectorAll("[data-legs]").forEach(el => el.textContent = Math.floor(FRAME / 3) % 2 ? LEGS_B : LOGO[2]);
+  document.querySelectorAll("[data-star]").forEach(el => el.textContent = STAR[FRAME % 10]);
+}, 150);
+
+setInterval(() => {
+  if (S) render();
+  if (Date.now() - lastPoll >= (S?.chat.working ? 700 : 2000)) poll();
+}, 1000);
+
+render();
+poll();
+</script>
+</body>
+</html>

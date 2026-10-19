@@ -1,6 +1,8 @@
 #!/bin/sh
-# Usage: claude-sessions [-a|--all] [-w|--watch] [-j|--json]
+# Usage: claude-sessions [-a|--all] [-w|--watch] [-j|--json] [-s|--serve [PORT]]
 #   default: live sessions only; -a also lists recent finished transcripts (last 24h)
+#   -s serves the dashboard as a web page on 127.0.0.1 (default port 7421, or $CS_PORT)
+export CS_SELF="$0"
 exec python3 -I - "$@" <<'PY'
 import json, os, sys, glob, time, subprocess, shutil, re
 from datetime import datetime
@@ -202,14 +204,15 @@ def agent_detail(path, agents, live, since):
             a["act"] = activity(f)
             if a.get("wait") and a["act"] == "finishing": a["act"] = "waiting"
 
-def collect():
+def collect(ended=None):
+    ended = show_all if ended is None else ended
     rows, seen = [], set()
     for jf in glob.glob(f"{HOME}/sessions/*.json"):
         try: d = json.load(open(jf))
         except Exception: continue
         pid, sid = d.get("pid"), d.get("sessionId")
         live = bool(pid) and alive(pid)
-        if not live and not show_all: continue
+        if not live and not ended: continue
         if d.get("cwd") == CHAT_DIR: continue
         seen.add(sid)
         tp = transcript(sid)
@@ -219,7 +222,7 @@ def collect():
             name=st["title"] or d.get("name"), cwd=st["wd"] or d.get("cwd", ""), kind=d.get("kind", ""),
             entry=d.get("entrypoint", ""), version=d.get("version", ""), started=d.get("startedAt", 0),
             updated=d.get("updatedAt", 0), uptime=etime(pid) if live else "-", **st))
-    if show_all:
+    if ended:
         cutoff = time.time() - 86400
         for p in glob.glob(f"{HOME}/projects/*/*.jsonl"):
             sid = os.path.basename(p)[:-6]
@@ -277,14 +280,17 @@ def clip(t, w):
         o += c
     return o + "…"
 
+def usage_data():
+    try: return json.load(open(f"{HOME}/state/rate-limits.json"))
+    except Exception: return None
+
 def usage_line(width):
     tty = ISTTY
     C = lambda n: f"\033[{n}m" if tty else ""
     Z, D, B = C(0), C(2), C(1)
     col = lambda p: C("38;5;167") if p >= 85 else C("38;5;179") if p >= 60 else C("38;5;114")
-    try:
-        d = json.load(open(f"{HOME}/state/rate-limits.json"))
-    except Exception:
+    d = usage_data()
+    if d is None:
         return f"{D} usage limits: no data yet (appears after the next status line refresh){Z}"
     rl, now = d.get("rate_limits") or {}, time.time()
     def rem(sec):
@@ -676,8 +682,111 @@ def chat_view(cols):
         out += [row(x) for x in log[-CHAT_ROWS:]] + [f"{bd}├{'─' * (W - 2)}┤{Z}"]
     return out + [row(field), f"{bd}╰{'─' * (W - 2)}╯{Z}"]
 
+def serve(port, fixed):
+    import threading, secrets
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import urlparse, parse_qs
+    web = os.path.join(os.path.dirname(os.path.realpath(os.environ.get("CS_SELF") or ".")), "web")
+    page = os.path.join(web, "index.html")
+    STATIC = {"/manifest.webmanifest": "application/manifest+json", "/sw.js": "text/javascript; charset=utf-8"}
+    token = secrets.token_urlsafe(24)
+    cache, lock = {}, threading.Lock()
+
+    def sessions(ended, fresh=False):
+        with lock:
+            t, rows = cache.get(ended, (0, []))
+            if fresh or time.time() - t >= 2:
+                rows = collect(ended)
+                cache[ended] = (time.time(), rows)
+            return rows
+
+    def chat_state():
+        return dict(log=[list(x) for x in CHAT], working=CHAT_PROC is not None, t0=CHAT_T0)
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+
+        def reply(self, code, body, ctype="application/json; charset=utf-8"):
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+                self.end_headers()
+                self.wfile.write(data)
+            except OSError:
+                pass
+
+        def allowed(self, api):
+            p = self.server.server_address[1]
+            if self.headers.get("Host") not in (f"127.0.0.1:{p}", f"localhost:{p}"):
+                self.reply(403, {"error": "bad host"}); return False
+            if api and not secrets.compare_digest(self.headers.get("X-CS-Token", ""), token):
+                self.reply(403, {"error": "bad token"}); return False
+            return True
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if not self.allowed(u.path.startswith("/api/")): return
+            if u.path == "/":
+                try: html = open(page, encoding="utf-8").read()
+                except OSError as e: return self.reply(500, f"cannot read {page}: {e}".encode(), "text/plain; charset=utf-8")
+                return self.reply(200, html.replace("__CS_TOKEN__", token).encode(), "text/html; charset=utf-8")
+            ctype = STATIC.get(u.path) or ("image/png" if re.fullmatch(r"/icons/[a-z0-9-]+\.png", u.path) else None)
+            if ctype:
+                try: data = open(os.path.join(web, u.path.lstrip("/")), "rb").read()
+                except OSError: return self.reply(404, {"error": "not found"})
+                return self.reply(200, data, ctype)
+            if u.path == "/api/state":
+                q = parse_qs(u.query)
+                rows = sessions(q.get("all") == ["1"], q.get("fresh") == ["1"])
+                return self.reply(200, dict(sessions=rows, usage=usage_data(), chat=chat_state(), now=time.time(),
+                    cfg=dict(window=WINDOW, agent_rows=AGENT_ROWS, chat_rows=CHAT_ROWS, chat_model=CHAT_MODEL, home=os.path.expanduser("~"))))
+            self.reply(404, {"error": "not found"})
+
+        def do_POST(self):
+            u = urlparse(self.path)
+            if not self.allowed(True): return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(min(n, 65536)) or b"{}") if n else {}
+            except (ValueError, OSError):
+                return self.reply(400, {"error": "bad body"})
+            if u.path == "/api/focus":
+                sid = body.get("sid")
+                with lock:
+                    row = next((r for _, rows in cache.values() for r in rows if r["sid"] == sid), None)
+                return self.reply(200, {"msg": focus(row) if row else "session not found"})
+            if u.path == "/api/chat":
+                text = str(body.get("text") or "").strip()
+                if text: chat_send(text, sessions(False))
+                return self.reply(200, chat_state())
+            self.reply(404, {"error": "not found"})
+
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    except OSError as e:
+        if fixed: sys.exit(f"claude-sessions: cannot listen on 127.0.0.1:{port}: {e.strerror}")
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    if not os.path.isfile(page): print(f"warning: {page} not found", file=sys.stderr)
+    print(f"claude-sessions web: http://127.0.0.1:{srv.server_address[1]}  (ctrl-c to stop)", flush=True)
+    try: srv.serve_forever()
+    except KeyboardInterrupt: pass
+    finally:
+        if CHAT_PROC: CHAT_PROC.terminate()
+        srv.server_close()
+
 once = any(a in ("-o", "--once") for a in args)
-if as_json or table or once or not sys.stdout.isatty():
+serve_at = next((i for i, a in enumerate(args) if a in ("-s", "--serve")), None)
+if serve_at is not None:
+    nxt = args[serve_at + 1] if serve_at + 1 < len(args) else ""
+    port = nxt if nxt.isdigit() else os.environ.get("CS_PORT", "")
+    serve(int(port) if port.isdigit() else 7421, port.isdigit())
+elif as_json or table or once or not sys.stdout.isatty():
     watch = False
     render(collect())
     if not (as_json or table):
