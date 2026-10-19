@@ -2,7 +2,8 @@
 
 A full-screen terminal dashboard for your running Claude Code sessions (macOS).
 One tile per session with status, context usage, model, tokens, working directory,
-git branch, current task, plus a fixed usage-limit bar at the bottom.
+git branch, current task, the session's subagents and workflows, plus a fixed usage-limit
+bar at the bottom.
 
 ## Install
 
@@ -42,6 +43,18 @@ and permissions bypassed, so it acts without asking.
 | `CS_REPO_ROOTS`   | `~/Projects` (colon-separated)                  |
 | `CS_CHAT_ROWS`    | `8` chat lines shown                            |
 
+## Agents
+
+Each tile lists the subagents (Agent tool) and workflows the session started. Running ones
+show their type, description, current tool (or the workflow's phase and agents done/started)
+and elapsed time. Finished ones stay listed for 60s with ✓ (done), ✗ (failed) or ■ (stopped),
+then only count in the `done` total. The header shows how many agents are running across all
+sessions.
+
+| Variable          | Default                                         |
+|-------------------|-------------------------------------------------|
+| `CS_AGENT_ROWS`   | `4` agent lines per tile (then `+N more`)       |
+
 ## Colours
 
 - orange logo: always; rainbow when the session is in ultracode
@@ -63,4 +76,5 @@ and `extras/com.user.claude-sessions.plist` to `~/Library/LaunchAgents/`, then
 
 - live sessions: `~/.claude/sessions/*.json`
 - transcripts: `~/.claude/projects/*/<sessionId>.jsonl`
+- agents: `~/.claude/projects/*/<sessionId>/subagents/` (agent transcripts, workflow journals)
 - limits: `~/.claude/state/rate-limits.json`

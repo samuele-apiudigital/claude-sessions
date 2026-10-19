@@ -2,7 +2,8 @@
 # Usage: claude-sessions [-a|--all] [-w|--watch] [-j|--json]
 #   default: live sessions only; -a also lists recent finished transcripts (last 24h)
 exec python3 -I - "$@" <<'PY'
-import json, os, sys, glob, time, subprocess, shutil
+import json, os, sys, glob, time, subprocess, shutil, re
+from datetime import datetime
 args = sys.argv[1:]
 ISTTY = sys.stdout.isatty()
 FRAME = 0
@@ -18,6 +19,7 @@ WINDOW = int(os.environ.get("CLAUDE_CTX_WINDOW", "0"))
 CHAT_DIR = f"{HOME}/state/cs-chat"
 CHAT_MODEL = os.environ.get("CS_CHAT_MODEL", "haiku")
 CHAT_ROWS = int(os.environ.get("CS_CHAT_ROWS", "8"))
+AGENT_ROWS = max(2, int(os.environ.get("CS_AGENT_ROWS", "4")))
 REPO_ROOTS = [r for r in (os.path.expanduser(x).rstrip("/") for x in os.environ.get("CS_REPO_ROOTS", "~/Projects").split(":")) if os.path.isdir(r)]
 CHAT, CHAT_SID, CHAT_PROC, REPOS, INPUT, CHAT_T0 = [], None, None, None, None, 0.0
 
@@ -36,19 +38,41 @@ def ago(ms):
     s = max(0, int(time.time() - ms/1000))
     return f"{s}s" if s < 60 else f"{s//60}m" if s < 3600 else f"{s//3600}h{s%3600//60:02d}m" if s < 86400 else f"{s//86400}d"
 
+def dur(sec):
+    sec = int(max(0, sec))
+    return f"{sec}s" if sec < 60 else f"{sec//60}m{sec%60:02d}s" if sec < 3600 else f"{sec//3600}h{sec%3600//60:02d}m"
+
+def epoch(ts):
+    try: return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except Exception: return None
+
+def tag(text, name):
+    m = re.search(f"<{name}>(.*?)</{name}>", text, re.S)
+    return m.group(1).strip() if m else None
+
 def transcript(sid):
     m = glob.glob(f"{HOME}/projects/*/{sid}.jsonl")
     return m[0] if m else None
 
 def stats(path):
-    s = dict(model="-", ctx=0, peak=0, turns=0, out=0, inp=0, cread=0, ccreate=0, tools=0, hist=[], title="", branch="", wd="", ultra=False, prompt="", cur_task="", done_task="", subjects=None, ncreate=0, first=None, last=None)
+    s = dict(model="-", ctx=0, peak=0, turns=0, out=0, inp=0, cread=0, ccreate=0, tools=0, hist=[], title="", branch="", wd="", ultra=False, prompt="", cur_task="", done_task="", subjects=None, ncreate=0, first=None, last=None, agents=[])
     s["subjects"] = {}
     if not path: return s
+    ag, by_task, pend = {}, {}, {}
+    def notified(text, ts):
+        for blk in text.split("<task-notification>")[1:]:
+            a = ag.get(by_task.get(tag(blk, "task-id"))) or ag.get(tag(blk, "tool-use-id"))
+            if not a: continue
+            a["wait"] = "background work" in f"{tag(blk, 'summary')} {tag(blk, 'note')}"
+            if a["state"] == "running" and not a["wait"]:
+                a["state"], a["t1"] = tag(blk, "status") or "completed", epoch(ts)
     with open(path, errors="ignore") as f:
         for line in f:
             try: d = json.loads(line)
             except Exception: continue
             t = d.get("type")
+            if t == "queue-operation" and "<task-notification>" in str(d.get("content") or ""):
+                notified(str(d["content"]), d.get("timestamp"))
             if t == "ai-title": s["title"] = d.get("aiTitle", "")
             if t == "attachment":
                 at = (d.get("attachment") or {}).get("type")
@@ -65,6 +89,27 @@ def stats(path):
                 c = d.get("message", {}).get("content")
                 if isinstance(c, str) or (isinstance(c, list) and any(x.get("type") == "text" for x in c if isinstance(x, dict))):
                     s["turns"] += 1
+                text = c if isinstance(c, str) else " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text") if isinstance(c, list) else ""
+                if "<task-notification>" in text: notified(text, ts)
+                res = d.get("toolUseResult") if isinstance(d.get("toolUseResult"), dict) else {}
+                for x in c if isinstance(c, list) else []:
+                    if not (isinstance(x, dict) and x.get("type") == "tool_result"): continue
+                    uid = x.get("tool_use_id")
+                    if uid in ag:
+                        a = ag[uid]
+                        if res.get("isAsync") or res.get("status") == "async_launched":
+                            a["aid"], a["run"] = res.get("agentId"), res.get("runId")
+                            if a["kind"] == "workflow": a["desc"] = res.get("workflowName") or a["desc"]
+                            for k in (res.get("agentId"), res.get("taskId")):
+                                if k: by_task[k] = uid
+                        elif a["state"] == "running":
+                            a["state"], a["t1"] = "failed" if x.get("is_error") else "completed", epoch(ts)
+                    elif uid in pend:
+                        nm, target = pend.pop(uid)
+                        a = ag.get(by_task.get(target))
+                        if not a or x.get("is_error"): continue
+                        if nm == "TaskStop": a["state"], a["t1"] = "stopped", epoch(ts)
+                        elif res.get("resumedAgentId"): a["state"], a["t1"] = "running", None
             if t == "assistant":
                 m = d.get("message", {})
                 u = m.get("usage") or {}
@@ -79,10 +124,21 @@ def stats(path):
                     if not (isinstance(x, dict) and x.get("type") == "tool_use"): continue
                     s["tools"] += 1
                     inp = x.get("input") or {}
-                    if x.get("name") == "TaskCreate":
+                    nm = x.get("name")
+                    if d.get("isSidechain"): pass
+                    elif nm in ("Agent", "Task"):
+                        ag[x["id"]] = dict(id=x["id"], kind="agent", type=inp.get("subagent_type") or "general-purpose",
+                            desc=inp.get("description") or "", state="running", t0=epoch(ts), t1=None, aid=None, run=None)
+                    elif nm == "Workflow":
+                        mn = re.search(r"\bname:\s*['\"]([^'\"]+)", str(inp.get("script") or ""))
+                        ag[x["id"]] = dict(id=x["id"], kind="workflow", type="workflow", desc=inp.get("name") or (mn.group(1) if mn else "workflow"),
+                            state="running", t0=epoch(ts), t1=None, aid=None, run=None)
+                    elif nm in ("TaskStop", "SendMessage"):
+                        pend[x["id"]] = (nm, inp.get("task_id") or inp.get("shell_id") or inp.get("to"))
+                    if nm == "TaskCreate":
                         s["ncreate"] += 1
                         s["subjects"][str(s["ncreate"])] = inp.get("subject", "")
-                    elif x.get("name") == "TaskUpdate":
+                    elif nm == "TaskUpdate":
                         tid, st_ = str(inp.get("taskId", "")), inp.get("status")
                         text = inp.get("activeForm") or s["subjects"].get(tid, "")
                         if st_ == "in_progress":
@@ -91,7 +147,60 @@ def stats(path):
                             s["done_task"] = s["subjects"].get(tid) or text or s["done_task"]
                             if s.get("cur_id") == tid: s["cur_task"] = ""
     s["hist"] = s["hist"][-36:]
+    s["agents"] = list(ag.values())
     return s
+
+def activity(path):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); f.seek(max(0, f.tell() - 65536))
+            raw = f.read().decode(errors="ignore")
+    except (OSError, TypeError):
+        return ""
+    for line in reversed(raw.splitlines()):
+        try: d = json.loads(line)
+        except Exception: continue
+        c = (d.get("message") or {}).get("content")
+        if d.get("type") == "user":
+            return "thinking" if isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c) else "starting"
+        if d.get("type") == "assistant":
+            used = [x.get("name", "") for x in c or [] if isinstance(x, dict) and x.get("type") == "tool_use"]
+            if used: return used[-1].split("__")[-1]
+            return "finishing" if d["message"].get("stop_reason") == "end_turn" else "thinking"
+    return "starting"
+
+def agent_detail(path, agents, live, since):
+    if not path: return
+    base = os.path.join(os.path.dirname(path), os.path.basename(path)[:-6], "subagents")
+    by_use = None
+    for a in agents:
+        if a["state"] == "running" and not (live and (a["t0"] or 0) * 1000 >= since - 5000):
+            a["state"] = "lost"
+        if a["kind"] == "workflow":
+            started, finished, a["phase"] = set(), set(), ""
+            try:
+                with open(os.path.join(base, "workflows", a["run"] or "-", "journal.jsonl"), errors="ignore") as f:
+                    for line in f:
+                        try: e = json.loads(line)
+                        except Exception: continue
+                        if e.get("type") == "started":
+                            started.add(e.get("key")); a["phase"] = e.get("phase") or a["phase"]
+                        elif e.get("type") == "result": finished.add(e.get("key"))
+            except OSError:
+                pass
+            a["nrun"] = len(started - finished) if a["state"] == "running" else 0
+            a["ndone"] = len(started) - a["nrun"]
+        elif a["state"] == "running":
+            f = os.path.join(base, f"agent-{a['aid']}.jsonl") if a["aid"] else None
+            if not f:
+                if by_use is None:
+                    by_use = {}
+                    for mf in glob.glob(os.path.join(base, "agent-*.meta.json")):
+                        try: by_use[json.load(open(mf)).get("toolUseId")] = mf[:-10] + ".jsonl"
+                        except Exception: pass
+                f = by_use.get(a["id"])
+            a["act"] = activity(f)
+            if a.get("wait") and a["act"] == "finishing": a["act"] = "waiting"
 
 def collect():
     rows, seen = [], set()
@@ -103,7 +212,9 @@ def collect():
         if not live and not show_all: continue
         if d.get("cwd") == CHAT_DIR: continue
         seen.add(sid)
-        st = stats(transcript(sid))
+        tp = transcript(sid)
+        st = stats(tp)
+        agent_detail(tp, st["agents"], live, d.get("startedAt") or 0)
         rows.append(dict(sid=sid, pid=pid, live=live, status=d.get("status", "?") if live else "ended",
             name=st["title"] or d.get("name"), cwd=st["wd"] or d.get("cwd", ""), kind=d.get("kind", ""),
             entry=d.get("entrypoint", ""), version=d.get("version", ""), started=d.get("startedAt", 0),
@@ -115,11 +226,19 @@ def collect():
             if sid in seen or os.path.getmtime(p) < cutoff: continue
             st = stats(p)
             if st["wd"] == CHAT_DIR: continue
+            agent_detail(p, st["agents"], False, 0)
             rows.append(dict(sid=sid, pid=None, live=False, status="ended", name=st["title"],
                 cwd=st["wd"] or os.path.basename(os.path.dirname(p)), kind="", entry="", version="", started=0,
                 updated=int(os.path.getmtime(p)*1000), uptime="-", **st))
     rows.sort(key=lambda r: (not r["live"], r["started"] if r["live"] else 0, -r["updated"]))
     return rows
+
+def agent_counts(r):
+    ags = r.get("agents") or []
+    running = sorted((a for a in ags if a["state"] == "running"), key=lambda a: a["t0"] or 0)
+    nrun = sum((a.get("nrun") or 1) if a["kind"] == "workflow" else 1 for a in running)
+    ndone = sum(a.get("ndone", 0) if a["kind"] == "workflow" else a["state"] != "running" for a in ags)
+    return running, nrun, ndone
 
 def render_table(rows):
     if as_json:
@@ -136,7 +255,8 @@ def render_table(rows):
         bar = f"{col}{'█'*fill}{D}{'░'*(n-fill)}{Z} {fmt(r['ctx']):>5} {pct:3.0f}%"
         sc = G if r["status"] == "busy" else Y if r["status"] == "idle" else D
         proj = os.path.basename(r["cwd"].rstrip("/")) or r["cwd"]
-        label = f"{r['name'] or r['title'] or r['sid'][:8]} {D}[{proj}]{Z}"
+        nag = agent_counts(r)[1]
+        label = f"{r['name'] or r['title'] or r['sid'][:8]} {D}[{proj}]{Z}" + (f" {Y}· {nag} agent{'s' if nag != 1 else ''}{Z}" if nag else "")
         pid = str(r["pid"] or "-")
         print(f"{pid:<7}{sc}{r['status']:<9}{Z}{bar:<{22+len(col)+len(D)+len(Z)}}{r['model'].replace('claude-',''):<18}"
               f"{r['turns']:>5} {r['tools']:>5} {fmt(r['out']):>6} {fmt(r['cread']):>8} {r['uptime']:>9} {ago(r['updated']) if r['updated'] else '-':>6}  {label}"[:cols+40])
@@ -197,8 +317,10 @@ def render(rows):
     Z, B, D = C(0), C(1), C(2)
     CY = TC(81)
     ORANGE, GREEN, AMBER, GRAY, RED, FG = TC(173), TC(114), TC(179), TC(240), TC(167), TC(253)
-    WAITGRAY = TC(248)
+    WAITGRAY, VIOLET = TC(248), TC(141)
     RAINBOW = [TC(n) for n in (196, 208, 220, 82, 45, 63, 171)]
+    SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    one = lambda x: " ".join(str(x).split())
     def logo_line(i, r, text):
         if r.get("ultra") and r["live"]:
             ph = FRAME // 2
@@ -219,12 +341,43 @@ def render(rows):
     nrun = sum(1 for r in live if r["status"] == "busy")
     nwait = sum(1 for r in live if r["status"] == "idle")
     nother = len(live) - nrun - nwait
+    nag = sum(agent_counts(r)[1] for r in live)
     head = (f" {ORANGE}{B}✻ Claude sessions{Z}   {ORANGE}●{Z} {nrun} running   {WAITGRAY}●{Z} {nwait} waiting"
             + (f"   {AMBER}●{Z} {nother} other" if nother else "")
+            + (f"   {VIOLET}◆{Z} {nag} agent{'s' if nag != 1 else ''}" if nag else "")
             + f"   {D}·  {fmt(sum(r['ctx'] for r in live))} context  ·  {fmt(sum(r['out'] for r in rows))} output  ·  {time.strftime('%H:%M:%S')}{Z}")
     print(head + "\n")
 
-    def make(r, W):
+    def agent_block(r, iw):
+        ags = r.get("agents") or []
+        if not ags: return []
+        now = time.time()
+        running, nrun, ndone = agent_counts(r)
+        recent = sorted((a for a in ags if a["state"] not in ("running", "lost") and a["t1"] and now - a["t1"] < 60), key=lambda a: -a["t1"])
+        head = (f"{D}AGENTS{Z}" + (f" {ORANGE}{B}{nrun}{Z} {D}running{Z}" if nrun else "") + (f" {D}·{Z}" if nrun and ndone else "")
+                + (f" {FG}{ndone}{Z} {D}done{Z}" if ndone else ""))
+        show, more = running + recent, 0
+        if len(show) > AGENT_ROWS: show, more = show[:AGENT_ROWS - 1], len(show) - AGENT_ROWS + 1
+        short = lambda a: {"general-purpose": "general", "claude-code-guide": "guide", "statusline-setup": "statusline"}.get(a["type"], a["type"])
+        tw = min(10, max((vw(short(a)) for a in show), default=0))
+        out = ["", head]
+        for k, a in enumerate(show):
+            on = a["state"] == "running"
+            if on:
+                ic = f"{ORANGE}{SPIN[(FRAME + k * 3) % 10]}{Z}"
+                act = f"{a['phase'] or 'running'} {a['ndone']}/{a['ndone'] + a['nrun']}" if a["kind"] == "workflow" else a.get("act") or "starting"
+                right = f"{act} {dur(now - (a['t0'] or now))}"
+            else:
+                ic = f"{WAITGRAY}✓{Z}" if a["state"] == "completed" else f"{RED}✗{Z}" if a["state"] == "failed" else f"{GRAY}■{Z}"
+                right = f"{'done' if a['state'] == 'completed' else a['state']} {dur(a['t1'] - (a['t0'] or a['t1']))}"
+            right = clip(right, max(6, iw // 3))
+            left = f"{ic} {VIOLET if on else D}{pad(clip(short(a), tw), tw)}{Z} "
+            mw = max(1, iw - vw(left) - vw(right) - 1)
+            out.append(left + pad(f"{FG if on else D}{clip(one(a['desc']) or '-', mw)}{Z}", mw) + f" {D}{right}{Z}")
+        if more: out.append(f"{D}  +{more} more{Z}")
+        return out
+
+    def make(r, W, ablock):
         iw = W - 8
         label, sc = state(r)
         busy = r["status"] == "busy"
@@ -253,7 +406,6 @@ def render(rows):
         if vw(wd) > dw: wd = "…" + wd[-(dw - 1):]
         br = r["branch"] if r["branch"] and r["branch"] != "HEAD" else ""
         brl = f"{CY}{clip(br, dw)}{Z}" if br else f"{D}none{Z}"
-        one = lambda x: " ".join(str(x).split())
         if r["status"] == "busy":
             tt = one(r["cur_task"] or r["prompt"])
             task_l = f"{ORANGE}▶{Z} {FG}{clip(tt, dw - 2)}{Z}" if tt else f"{D}working…{Z}"
@@ -270,6 +422,7 @@ def render(rows):
             f"{D}dir{Z}  {FG}{wd}{Z}",
             f"{D}git{Z}  {brl}",
             f"{D}task{Z} {task_l}",
+            *ablock,
             "",
             pad(f"{D}CONTEXT{Z} {FG}{fmt(r['ctx'])}{D}/{fmt(w)}{Z}", iw - 4) + f"{bc}{B}{pct:3.0f}%{Z}",
             bar,
@@ -305,13 +458,16 @@ def render(rows):
     if tty and not watch:
         sys.stdout.write("\033[H\033[2J")
     TILES.clear()
+    y0 = 3
     for i in range(0, len(rows), per):
         chunk = rows[i:i+per]
-        tiles = [make(r, ws[j]) for j, r in enumerate(chunk)]
+        blocks = [agent_block(r, ws[j] - 8) for j, r in enumerate(chunk)]
+        nb = max(map(len, blocks))
+        tiles = [make(r, ws[j], blocks[j] + [""] * (nb - len(blocks[j]))) for j, r in enumerate(chunk)]
         for j, r in enumerate(chunk):
             x0 = sum(ws[:j]) + j + 1
-            y0 = 3 + (i // per) * len(tiles[0])
             TILES.append(dict(sid=r["sid"], idx=i + j, x0=x0, x1=x0 + ws[j] - 1, y0=y0, y1=y0 + len(tiles[0]) - 1))
+        y0 += len(tiles[0])
         for ln in zip(*tiles):
             print(" ".join(ln))
     print(f"{D} ctx = last request input · window {'$CLAUDE_CTX_WINDOW' if WINDOW else '200k, 1M if peak>200k'} · -o once · -t table · -a all · -j json{Z}")
