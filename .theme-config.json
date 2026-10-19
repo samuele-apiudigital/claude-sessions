@@ -1,0 +1,20 @@
+{
+  "selected": "terminal",
+  "themes": [
+    {
+      "id": "terminal",
+      "title": "Terminal",
+      "file": "Terminal-theme.css"
+    },
+    {
+      "id": "claude",
+      "title": "Claude",
+      "file": "Claude-theme.css"
+    },
+    {
+      "id": "dracula",
+      "title": "Dracula",
+      "file": "Dracula-theme.css"
+    }
+  ]
+}

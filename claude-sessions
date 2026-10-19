@@ -686,11 +686,13 @@ def serve(port, fixed):
     import threading, secrets
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
     from urllib.parse import urlparse, parse_qs
-    web = os.path.join(os.path.dirname(os.path.realpath(os.environ.get("CS_SELF") or ".")), "web")
+    root = os.path.dirname(os.path.realpath(os.environ.get("CS_SELF") or "."))
+    web = os.path.join(root, "web")
     page = os.path.join(web, "index.html")
+    theme_cfg = os.path.join(root, ".theme-config.json")
     STATIC = {"/manifest.webmanifest": "application/manifest+json", "/sw.js": "text/javascript; charset=utf-8"}
     token = secrets.token_urlsafe(24)
-    cache, lock = {}, threading.Lock()
+    cache, lock, tlock = {}, threading.Lock(), threading.Lock()
 
     def sessions(ended, fresh=False):
         with lock:
@@ -699,6 +701,16 @@ def serve(port, fixed):
                 rows = collect(ended)
                 cache[ended] = (time.time(), rows)
             return rows
+
+    def themes():
+        try: c = json.load(open(theme_cfg, encoding="utf-8"))
+        except (OSError, ValueError): c = {}
+        if not isinstance(c, dict): c = {}
+        lst = [dict(id=str(t["id"]), title=str(t.get("title") or t["id"]), file=t["file"]) for t in c.get("themes") or []
+               if isinstance(t, dict) and t.get("id") and re.fullmatch(r"[A-Za-z0-9_-]+\.css", str(t.get("file", "")))]
+        lst = lst or [dict(id="terminal", title="Terminal", file="Terminal-theme.css")]
+        cur = next((t for t in lst if t["id"] == c.get("selected")), lst[0])
+        return c, lst, cur
 
     def chat_state():
         return dict(log=[list(x) for x in CHAT], working=CHAT_PROC is not None, t0=CHAT_T0)
@@ -714,7 +726,7 @@ def serve(port, fixed):
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'")
+                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
                 self.end_headers()
                 self.wfile.write(data)
             except OSError:
@@ -734,8 +746,10 @@ def serve(port, fixed):
             if u.path == "/":
                 try: html = open(page, encoding="utf-8").read()
                 except OSError as e: return self.reply(500, f"cannot read {page}: {e}".encode(), "text/plain; charset=utf-8")
-                return self.reply(200, html.replace("__CS_TOKEN__", token).encode(), "text/html; charset=utf-8")
-            ctype = STATIC.get(u.path) or ("image/png" if re.fullmatch(r"/icons/[a-z0-9-]+\.png", u.path) else None)
+                html = html.replace("__CS_TOKEN__", token).replace("__CS_THEME__", f"/themes/{themes()[2]['file']}")
+                return self.reply(200, html.encode(), "text/html; charset=utf-8")
+            ctype = (STATIC.get(u.path) or ("image/png" if re.fullmatch(r"/icons/[a-z0-9-]+\.png", u.path) else None)
+                or ("text/css; charset=utf-8" if re.fullmatch(r"/themes/[A-Za-z0-9_-]+\.css", u.path) else None))
             if ctype:
                 try: data = open(os.path.join(web, u.path.lstrip("/")), "rb").read()
                 except OSError: return self.reply(404, {"error": "not found"})
@@ -743,8 +757,9 @@ def serve(port, fixed):
             if u.path == "/api/state":
                 q = parse_qs(u.query)
                 rows = sessions(q.get("all") == ["1"], q.get("fresh") == ["1"])
+                _, lst, cur = themes()
                 return self.reply(200, dict(sessions=rows, usage=usage_data(), chat=chat_state(), now=time.time(),
-                    cfg=dict(window=WINDOW, agent_rows=AGENT_ROWS, chat_rows=CHAT_ROWS, chat_model=CHAT_MODEL, home=os.path.expanduser("~"))))
+                    cfg=dict(themes=lst, theme=cur["id"], window=WINDOW, agent_rows=AGENT_ROWS, chat_rows=CHAT_ROWS, chat_model=CHAT_MODEL, home=os.path.expanduser("~"))))
             self.reply(404, {"error": "not found"})
 
         def do_POST(self):
@@ -760,6 +775,20 @@ def serve(port, fixed):
                 with lock:
                     row = next((r for _, rows in cache.values() for r in rows if r["sid"] == sid), None)
                 return self.reply(200, {"msg": focus(row) if row else "session not found"})
+            if u.path == "/api/theme":
+                with tlock:
+                    c, lst, _ = themes()
+                    t = next((t for t in lst if t["id"] == body.get("id")), None)
+                    if not t: return self.reply(400, {"error": "unknown theme"})
+                    c["themes"] = c.get("themes") or lst
+                    c["selected"] = t["id"]
+                    tmp = theme_cfg + ".tmp"
+                    try:
+                        with open(tmp, "w", encoding="utf-8") as f: f.write(json.dumps(c, indent=2, ensure_ascii=False) + "\n")
+                        os.replace(tmp, theme_cfg)
+                    except OSError as e:
+                        return self.reply(500, {"error": f"cannot write {theme_cfg}: {e.strerror}"})
+                return self.reply(200, {"theme": t["id"]})
             if u.path == "/api/chat":
                 text = str(body.get("text") or "").strip()
                 if text: chat_send(text, sessions(False))

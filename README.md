@@ -45,6 +45,26 @@ button in Chrome's address bar; in Safari use File › Add to Dock. The app need
 running on the same port; while the server is down it shows the last page as offline and
 reloads itself when the server is back.
 
+### Themes
+
+Pick a theme from the select in the top-right corner. Themes are listed in `.theme-config.json`,
+which also stores the selected one (the select writes it back; editing the file by hand works too,
+it is read on every request):
+
+```json
+{
+  "selected": "terminal",
+  "themes": [
+    { "id": "terminal", "title": "Terminal", "file": "Terminal-theme.css" },
+    { "id": "claude", "title": "Claude", "file": "Claude-theme.css" }
+  ]
+}
+```
+
+Each theme is one complete stylesheet in `web/themes/`. To add one, copy a theme file, restyle
+it, and add an entry to `themes`. The page sets some colours inline, so a theme must define the
+tokens listed at the top of `Terminal-theme.css`.
+
 It only accepts requests addressed to `127.0.0.1`/`localhost` that carry a token generated at
 startup, so other websites can't drive the chat (which runs with permissions bypassed).
 
