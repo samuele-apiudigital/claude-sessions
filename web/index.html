@@ -15,10 +15,59 @@
 </head>
 <body>
 <div class="app">
-  <header class="top"><div class="top-info" id="head"><span class="brand">✻ Claude sessions</span></div><label class="theme-pick"><span>theme</span><select id="theme" aria-label="Theme"></select></label></header>
+  <header class="top"><div class="top-info" id="head"><span class="brand">✻ Claude sessions</span></div>
+    <nav class="tabs" id="tabs" aria-label="View"><button type="button" data-tab="sessions">sessions</button><button type="button" data-tab="tasks">tasks <span class="tab-n" id="tabN"></span></button></nav>
+    <label class="theme-pick"><span>theme</span><select id="theme" aria-label="Theme"></select></label></header>
   <main class="body" id="main">
     <div class="tiles" id="tiles"></div>
     <div class="tbl-wrap" id="table" hidden></div>
+    <section class="tasks" id="tasks" aria-label="Tasks" hidden>
+      <div class="tk-bar">
+        <button type="button" class="tk-btn primary" id="tkNew">+ new task</button>
+        <div class="tk-seg" id="tkShow">show <button type="button" data-show="open">open</button><span class="dim">·</span><button type="button" data-show="all">all</button></div>
+        <span class="tk-sum" id="tkSum"></span>
+        <div class="tk-inbox">
+          <span class="tk-scan" id="tkScanInfo"></span>
+          <label class="tk-auto" title="scan the inbox automatically while cs runs"><input type="checkbox" id="tkAuto"> auto every <select id="tkEvery" aria-label="Minutes between scans"><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="30">30</option><option value="60">60</option></select> min</label>
+          <button type="button" class="tk-btn" id="tkMail">inbox log</button>
+          <button type="button" class="tk-btn" id="tkScan">scan inbox</button>
+        </div>
+      </div>
+      <section class="tk-mail" id="tkMailBox" aria-label="Inbox log" hidden>
+        <div class="tk-mail-hd"><span class="tk-mail-title">inbox log</span><span class="tk-mail-sub" id="tkMailSub"></span><button type="button" class="tk-x" id="tkMailClose" title="close (m)" aria-label="Close">✕</button></div>
+        <div class="tk-mail-list" id="tkMailList"></div>
+      </section>
+      <form class="tk-form" id="tkForm" autocomplete="off" hidden>
+        <div class="tk-form-head" id="tkFormHead">new task</div>
+        <label class="f-title"><span>title</span><input name="title" maxlength="200" spellcheck="false"></label>
+        <label class="f-proj"><span>project</span><input name="project" list="tkProjects" placeholder="client/repo, or just the client" spellcheck="false"></label>
+        <label><span>kind</span><select name="kind"><option value="fix">fix · change code</option><option value="check">check · investigate</option></select></label>
+        <label><span>priority</span><select name="priority"><option value="">none</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></label>
+        <label class="f-sum"><span>description</span><textarea name="summary" rows="5"></textarea></label>
+        <div class="tk-form-acts"><button type="submit" class="tk-btn primary">save</button><button type="button" class="tk-btn" id="tkCancel">cancel</button><span class="tk-err" id="tkErr"></span></div>
+        <datalist id="tkProjects"></datalist>
+      </form>
+      <div class="tk-wrap" id="tkWrap">
+        <div class="tk-list" id="tkList"></div>
+        <aside class="tk-detail" id="tkDetail" aria-label="Task" hidden>
+          <div id="tkInfo"></div>
+          <div class="tk-ctl">
+            <label>status <select id="tkStatus"></select></label>
+            <label>priority <select id="tkPrio"><option value="">none</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></label>
+            <label>kind <select id="tkKind"><option value="fix">fix</option><option value="check">check</option></select></label>
+          </div>
+          <div class="tk-acts">
+            <button type="button" class="tk-btn" id="tkEdit">edit</button>
+            <button type="button" class="tk-btn" id="tkSub">+ subtask</button>
+            <button type="button" class="tk-btn" id="tkOpen">open in VS Code</button>
+            <button type="button" class="tk-btn" id="tkDismiss" title="reject it and teach the inbox scan that mail like this is not a task">not a task</button>
+            <button type="button" class="tk-btn danger" id="tkDel">delete</button>
+          </div>
+          <input class="tk-note" id="tkNote" autocomplete="off" spellcheck="false" placeholder="add a note · enter saves" aria-label="Add a note">
+          <div class="tk-log" id="tkLog"></div>
+        </aside>
+      </div>
+    </section>
     <p class="empty" id="empty">Loading sessions…</p>
     <p class="note" id="note"></p>
   </main>
@@ -66,6 +115,26 @@ let FRAME = 0;
 let lastPoll = 0, polling = false, chatSig = "";
 let themeSetAt = 0;
 let projSel = 0, projSig = "";
+let tab = store.get("cs.tab") === "tasks" ? "tasks" : "sessions";
+let tkShow = store.get("cs.tkshow") === "all" ? "all" : "open";
+let tkSel = null, tkCur = null, tkLoading = null, tkMode = null, tkSig = "", tkInfoSig = "", tkDlSig = "";
+let mailOpen = false, mailData = null, mailKey = "", mailSig = "", scanSig = "";
+
+const TS = {
+  new: ["new", "var(--fg)", "○"],
+  queued: ["queued", "var(--wait)", "◌"],
+  analyzing: ["analyzing", "var(--orange)", ""],
+  awaiting_approval: ["to approve", "var(--amber)", "◆"],
+  implementing: ["implementing", "var(--orange)", ""],
+  in_review: ["to review", "var(--amber)", "◆"],
+  needs_info: ["needs info", "var(--violet)", "?"],
+  done: ["done", "var(--green)", "✓"],
+  rejected: ["rejected", "var(--gray)", "■"],
+  failed: ["failed", "var(--red)", "✗"],
+};
+const T_SORT = ["awaiting_approval", "in_review", "needs_info", "failed", "analyzing", "implementing", "queued", "new", "done", "rejected"];
+const T_YOU = new Set(["awaiting_approval", "in_review", "needs_info", "failed"]);
+const PRIO = { high: 0, medium: 1, low: 2 };
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const one = s => String(s ?? "").split(/\s+/).filter(Boolean).join(" ");
@@ -145,7 +214,8 @@ function tileHTML(r) {
   const pct = Math.min(100, r.ctx / w * 100);
   const bc = pct >= 85 ? "var(--red)" : pct >= 60 ? "var(--amber)" : "var(--sc)";
   const ent = { "claude-vscode": "VS Code", cli: "CLI" }[r.entry] ?? (r.entry || "");
-  const tag = r.pid ? `#${r.pid}` + (ent ? ` · ${ent}` : "") : "transcript";
+  const tk = (S.tasks?.list || []).find(x => x.session_id === r.sid);
+  const tag = (tk ? `task #${tk.id} · ` : "") + (r.pid ? `#${r.pid}` + (ent ? ` · ${ent}` : "") : "transcript");
   const wd = home(r.cwd);
   const br = r.branch && r.branch !== "HEAD" ? r.branch : "";
   let task;
@@ -332,23 +402,309 @@ async function openProject(path) {
   renderHint();
 }
 
+const isOpen = t => t.status !== "done" && t.status !== "rejected";
+const tkTasks = () => S?.tasks?.list || [];
+const tkLabel = t => (TS[t.status] || [t.status])[0];
+const tkColor = t => (TS[t.status] || [0, "var(--dim)"])[1];
+function tkIcon(t) {
+  const ic = (TS[t.status] || [0, 0, "·"])[2];
+  return ic ? esc(ic) : `<span data-spin="0">${SPIN[FRAME % 10]}</span>`;
+}
+const needs = n => `<b class="tk-you">${n} need${n === 1 ? "s" : ""} you</b>`;
+const gmail = u => /^https:\/\/mail\.google\.com\//.test(u || "") ? u : "";
+function when(s) {
+  const d = new Date(s);
+  return isNaN(d) ? s || "" : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function scanHTML(ib) {
+  if (!ib) return "";
+  if (ib.running) return `<span class="o"><span data-spin="0">${SPIN[FRAME % 10]}</span> scanning the inbox… ${dur(nowS() - (ib.t0 || nowS()))}</span>`;
+  const l = ib.last;
+  let h = !l ? `<span class="dim">no scan yet</span>`
+    : l.ok ? `last scan ${ago(l.t0 * 1000)} ago` + (l.created ? ` · <b class="o">${l.created} new</b>` : "") + (l.updated ? ` · ${l.updated} updated` : "")
+    : `<span class="err" title="${esc(l.error || "")}">scan failed ${ago(l.t0 * 1000)} ago: ${esc(one(l.error || "unknown error").slice(0, 80))}</span>`;
+  if (ib.auto && ib.next) h += ` <span class="dim">· next ${ib.next <= nowS() ? "soon" : "in " + rem(ib.next - nowS())}</span>`;
+  return h;
+}
+
+function mailHTML() {
+  if (!mailData) return `<p class="dim">loading…</p>`;
+  if (!mailData.threads.length) return `<p class="dim">No email seen yet. Every inbox thread a scan looks at is listed here with its verdict.</p>`;
+  return mailData.threads.map(th => {
+    const task = th.outcome === "task", url = gmail(th.url);
+    const act = task ? (th.task_id ? `<a href="#" data-goto="${th.task_id}">task #${th.task_id}</a>` : `<span class="dim">task deleted</span>`)
+      : `<button type="button" class="tm-make" data-make="${esc(th.id)}">make task</button>`;
+    const subj = esc(th.subject || "(no subject)");
+    return `<div class="tm-row${task ? " task" : ""}"><span class="tm-o">${task ? "✓" : "–"}</span>`
+      + `<span class="tm-date" title="${esc(when(th.date))}">${th.date && !isNaN(new Date(th.date)) ? ago(new Date(th.date).getTime()) : ""}</span>`
+      + `<span class="tm-from" title="${esc(th.sender)}">${esc(th.sender)}</span>`
+      + `<span class="tm-subj" title="${subj}">${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${subj}</a>` : subj}</span>`
+      + `<span class="tm-why" title="${esc(th.reason || "")}">${esc(th.reason || "")}</span><span class="tm-act">${act}</span></div>`;
+  }).join("");
+}
+
+async function loadMail() {
+  try { mailData = await api("/api/inbox"); }
+  catch (e) { flash = [`could not load the inbox log: ${e.message}`, Date.now()]; }
+  mailSig = "";
+  renderTasks();
+}
+
+function renderInbox() {
+  const ib = S.tasks?.inbox;
+  const sh = scanHTML(ib);
+  if (sh !== scanSig) { $("tkScanInfo").innerHTML = sh; scanSig = sh; }
+  $("tkScan").disabled = !ib || ib.running;
+  if (ib) {
+    if (document.activeElement !== $("tkAuto")) $("tkAuto").checked = ib.auto;
+    const ev = $("tkEvery");
+    if (![...ev.options].some(o => o.value === String(ib.every))) ev.add(new Option(String(ib.every), String(ib.every)));
+    if (document.activeElement !== ev) ev.value = String(ib.every);
+  }
+  $("tkMail").classList.toggle("on", mailOpen);
+  $("tkMailBox").hidden = !mailOpen;
+  if (!mailOpen) return;
+  const key = JSON.stringify([ib?.last?.id, ib?.last?.t1, tkTasks().length]);
+  if (key !== mailKey) { mailKey = key; loadMail(); }
+  const scans = mailData?.scans || [];
+  $("tkMailSub").textContent = mailData ? `${mailData.threads.length} threads · last ${scans.length} scans cost $${scans.reduce((s, x) => s + (x.cost || 0), 0).toFixed(2)} · ${ib?.model || ""}` : "";
+  const html = mailHTML();
+  if (html !== mailSig) { $("tkMailList").innerHTML = html; mailSig = html; }
+}
+
+async function scanNow() {
+  try { flash = [(await api("/api/inbox/scan", {})).msg, Date.now()]; }
+  catch (e) { flash = [`could not start a scan: ${e.message}`, Date.now()]; }
+  await poll();
+}
+
+function toggleMail() {
+  mailOpen = !mailOpen;
+  mailKey = "";
+  render();
+  if (mailOpen) $("tkMailBox").scrollIntoView({ block: "nearest" });
+}
+
+function tasksHTML() {
+  const all = tkTasks(), ids = new Set(all.map(t => t.id)), kids = new Map();
+  for (const t of all) if (t.parent_id && ids.has(t.parent_id)) {
+    if (!kids.has(t.parent_id)) kids.set(t.parent_id, []);
+    kids.get(t.parent_id).push(t);
+  }
+  const vis = t => tkShow === "all" || isOpen(t) || (kids.get(t.id) || []).some(vis);
+  const order = (a, b) => T_SORT.indexOf(a.status) - T_SORT.indexOf(b.status) || (PRIO[a.priority] ?? 3) - (PRIO[b.priority] ?? 3) || b.updated - a.updated;
+  const roots = all.filter(t => !(t.parent_id && ids.has(t.parent_id)) && vis(t)).sort(order);
+  if (!roots.length) return all.length
+    ? `<p class="empty">No open tasks. Press <b>a</b> to show done and rejected ones too.</p>`
+    : `<p class="empty">No tasks yet. Press <b>n</b> to add one.</p>`;
+  const row = (t, d) => {
+    let h = `<div class="tk-row${t.id === tkSel ? " sel" : ""}${isOpen(t) ? "" : " closed"}" data-tid="${t.id}" style="--tc:${tkColor(t)};--d:${d}">`
+      + `<span class="tk-ic">${tkIcon(t)}</span><span class="tk-id">#${t.id}</span>`
+      + `<span class="tk-title" title="${esc(t.title)}">${d ? `<span class="dim">└ </span>` : ""}`
+      + `${t.source === "email" ? `<span class="tk-src" title="from email">✉&#xFE0E;</span> ` : ""}${esc(t.title)}</span>`
+      + `<span class="tk-tags">${t.priority ? `<span class="tk-prio p-${esc(t.priority)}">${esc(t.priority)}</span>` : ""}<span class="tk-kind">${esc(t.kind)}</span></span>`
+      + `<span class="tk-st">${esc(tkLabel(t))}${t.sess ? ` <span class="tk-live" title="its Claude session is ${t.sess.status === "busy" ? "working" : "waiting for you"}">${t.sess.status === "busy" ? "●" : "○"}</span>` : ""}</span>`
+      + `<span class="tk-age" title="last change">${ago(t.updated * 1000)}</span></div>`;
+    for (const k of (kids.get(t.id) || []).filter(vis).sort(order)) h += row(k, d + 1);
+    return h;
+  };
+  const clients = new Map();
+  for (const t of roots) {
+    if (!clients.has(t.client)) clients.set(t.client, []);
+    clients.get(t.client).push(t);
+  }
+  const of = c => all.filter(t => t.client === c);
+  const rank = c => [of(c).some(t => T_YOU.has(t.status)) ? 0 : 1, -Math.max(...of(c).map(t => t.updated))];
+  return [...clients.keys()].sort((a, b) => { const x = rank(a), y = rank(b); return x[0] - y[0] || x[1] - y[1]; }).map(c => {
+    const ts = of(c), you = ts.filter(t => T_YOU.has(t.status)).length, open = ts.filter(isOpen).length;
+    const repos = new Map();
+    for (const t of clients.get(c)) {
+      if (!repos.has(t.rel || "")) repos.set(t.rel || "", []);
+      repos.get(t.rel || "").push(t);
+    }
+    let h = `<section class="tk-client${you ? " you" : ""}"><div class="tk-client-hd"><span class="tk-client-name">${esc(c)}</span>`
+      + `<span class="tk-counts">${you ? needs(you) + " · " : ""}${open} open · ${ts.length - open} closed</span></div>`;
+    for (const [rel, list] of [...repos].sort((a, b) => (a[0] === "") - (b[0] === "") || a[0].localeCompare(b[0]))) {
+      h += `<div class="tk-repo">${rel ? esc(rel.split("/").slice(1).join("/") || rel) : `<span class="dim">repo not set</span>`}</div>`;
+      for (const t of list) h += row(t, 0);
+    }
+    return h + `</section>`;
+  }).join("");
+}
+
+function renderTasks() {
+  const all = tkTasks(), open = all.filter(isOpen).length, you = all.filter(t => T_YOU.has(t.status)).length;
+  $("tabN").innerHTML = (open ? String(open) : "") + (you ? ` <b>◆${you}</b>` : "");
+  if (tab !== "tasks") return;
+  $("tkSum").innerHTML = S.tasks?.err ? `<span class="err">${esc(S.tasks.err)}</span>`
+    : `${open} open${you ? " · " + needs(you) : ""} · ${all.length - open} closed`;
+  $("tkShow").querySelectorAll("[data-show]").forEach(b => b.classList.toggle("on", b.dataset.show === tkShow));
+  renderInbox();
+  if (tkSel && S.tasks && !S.tasks.err && !all.some(t => t.id === tkSel)) { tkSel = null; tkCur = null; }
+  const html = tasksHTML();
+  if (html !== tkSig) { $("tkList").innerHTML = html; tkSig = html; }
+  const rels = (S.projects || []).map(p => p.rel);
+  const opts = [...new Set(rels.map(r => r.split("/")[0]).concat(rels))].sort();
+  const dl = JSON.stringify(opts);
+  if (dl !== tkDlSig) { $("tkProjects").innerHTML = opts.map(o => `<option value="${esc(o)}">`).join(""); tkDlSig = dl; }
+  const cur = all.find(t => t.id === tkSel);
+  if (cur && (!tkCur || tkCur.id !== cur.id || tkCur.updated !== cur.updated)) loadTask(cur.id);
+  $("tkWrap").classList.toggle("split", !!tkSel);
+  renderDetail();
+}
+
+async function loadTask(id) {
+  if (tkLoading === id) return;
+  tkLoading = id;
+  try { const t = await api(`/api/task?id=${id}`); if (id === tkSel) tkCur = t; }
+  catch (e) { if (id === tkSel) flash = [`could not load task #${id}: ${e.message}`, Date.now()]; }
+  finally { tkLoading = null; }
+  renderDetail();
+}
+
+function renderDetail() {
+  $("tkDetail").hidden = !tkSel;
+  if (!tkSel) return;
+  const t = tkCur && tkCur.id === tkSel ? tkCur : null;
+  const sess = tkTasks().find(x => x.id === tkSel)?.sess || null;
+  const sig = JSON.stringify([t, sess]) + Math.floor(nowS() / 30);
+  if (sig === tkInfoSig) return;
+  tkInfoSig = sig;
+  if (!t) { $("tkInfo").innerHTML = `<p class="dim">loading #${tkSel}…</p>`; $("tkLog").innerHTML = ""; return; }
+  const kv = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : "";
+  $("tkInfo").innerHTML = `<div class="tk-d-hd" style="--tc:${tkColor(t)}"><span class="tk-id">#${t.id}</span><span class="tk-badge">${tkIcon(t)} ${esc(tkLabel(t))}</span>`
+    + `<button type="button" class="tk-x" data-act="close" title="close (esc)" aria-label="Close">✕</button></div>`
+    + `<h2 class="tk-d-title">${esc(t.title)}</h2>`
+    + `<dl class="tk-kv">${kv("project", esc(t.rel || `${t.client} · repo not set`))}`
+    + kv("parent", t.parent_id ? `<a href="#" data-goto="${t.parent_id}">#${t.parent_id}</a>` : "")
+    + kv("source", esc(t.source)) + kv("branch", t.branch ? `<span class="cy">${esc(t.branch)}</span>` : "")
+    + kv("created", `${ago(t.created * 1000)} ago`) + `</dl>`
+    + sessHTML(t, sess)
+    + (t.report ? `<div class="tk-sec">report</div><div class="tk-text">${esc(t.report)}</div>` : "")
+    + (t.changes ? `<div class="tk-sec">changes</div><dl class="tk-kv">${kv("worktree", t.changes.worktree ? esc(home(t.changes.worktree)) : `<span class="dim">none</span>`)}</dl>`
+      + (t.changes.commits ? `<div class="tk-text tk-code">${esc(t.changes.commits)}${t.changes.stat ? "\n\n" + esc(t.changes.stat) : ""}</div>` : `<p class="dim">no commits on the branch yet</p>`) : "")
+    + (t.result ? `<div class="tk-sec">${t.kind === "check" ? "findings" : "plan"}</div><div class="tk-text">${esc(t.result)}</div>` : "")
+    + `<div class="tk-sec">description</div>` + (t.summary ? `<div class="tk-text">${esc(t.summary)}</div>` : `<p class="dim">no description</p>`)
+    + (t.thread ? `<div class="tk-sec">email</div><dl class="tk-kv">${kv("from", esc(t.thread.sender))}${kv("subject", esc(t.thread.subject))}`
+      + `${kv("date", esc(when(t.thread.date)))}</dl>`
+      + (gmail(t.thread.url) ? `<a class="tk-gmail" href="${esc(gmail(t.thread.url))}" target="_blank" rel="noopener">open in Gmail ↗</a>` : "") : "");
+  $("tkLog").innerHTML = t.events.slice().reverse().map(e => `<div class="tk-ev"><span class="tk-ev-t">${ago(e.t * 1000)}</span>`
+    + `<span class="tk-ev-k">${esc(e.kind)}</span><span class="x">${esc(e.kind === "status" ? e.text.replace(/\w+/g, s => TS[s]?.[0] ?? s) : e.text)}</span></div>`).join("");
+  for (const [id, v] of [["tkStatus", t.status], ["tkPrio", t.priority || ""], ["tkKind", t.kind]])
+    if (document.activeElement !== $(id)) $(id).value = v;
+  $("tkOpen").disabled = !t.repo;
+  $("tkDismiss").hidden = !(t.source === "email" && isOpen(t));
+}
+
+function sessHTML(t, sess) {
+  let line, acts;
+  if (!t.session_id) {
+    line = t.repo ? `No Claude session yet. Analyze opens one in a Terminal tab, in plan mode, in ${esc(home(t.repo))}.`
+      : `Set the task's repo (edit, then pick client/repo) to analyze it.`;
+    acts = `<button type="button" class="tk-btn primary" data-act="analyze"${t.repo ? "" : " disabled"}>analyze</button>`;
+  } else if (sess) {
+    const busy = sess.status === "busy";
+    line = busy ? `<span class="o"><span data-spin="0">${SPIN[FRAME % 10]}</span> session ${esc(t.session_id.slice(0, 8))} is working</span>${sess.act ? ` <span class="dim">· ${esc(one(sess.act))}</span>` : ""}`
+      : t.status === "awaiting_approval" ? `<b class="tk-you">◆ the plan waits for you</b> <span class="dim">in session ${esc(t.session_id.slice(0, 8))}: approve it or comment there</span>`
+      : `<span class="tk-you">○ session ${esc(t.session_id.slice(0, 8))} is waiting for you</span>`;
+    acts = `<button type="button" class="tk-btn primary" data-act="focus">focus session</button>`;
+  } else if (t.status === "analyzing" && nowS() - t.updated < 90) {
+    line = `<span class="o"><span data-spin="0">${SPIN[FRAME % 10]}</span> starting session ${esc(t.session_id.slice(0, 8))} in Terminal…</span>`;
+    acts = "";
+  } else {
+    line = `<span class="dim">session ${esc(t.session_id.slice(0, 8))} has ended</span>`;
+    acts = `<button type="button" class="tk-btn primary" data-act="resume">resume session</button>`
+      + `<button type="button" class="tk-btn" data-act="again">analyze again</button>`;
+  }
+  return `<div class="tk-sess"><div class="tk-sess-line">${line}</div>${acts ? `<div class="tk-acts">${acts}</div>` : ""}</div>`;
+}
+
+async function taskSession(resume) {
+  const t = tkCur;
+  if (!t) return;
+  try {
+    tkCur = await api("/api/task/session", { id: t.id, resume });
+    flash = [resume ? `resumed #${t.id}'s session in Terminal` : `#${t.id}: Claude is analyzing it in a new Terminal tab`, Date.now()];
+  } catch (e) {
+    flash = [`could not start the session: ${e.message}`, Date.now()];
+  }
+  tkInfoSig = "";
+  await poll(true);
+}
+
+function selectTask(id) {
+  tkSel = id;
+  tkInfoSig = "";
+  render();
+  if (!id) return;
+  document.querySelector(`.tk-row[data-tid="${id}"]`)?.scrollIntoView({ block: "nearest" });
+  if (!matchMedia("(min-width: 901px)").matches) $("tkDetail").scrollIntoView({ block: "nearest" });
+}
+
+function moveTask(d) {
+  const ids = [...$("tkList").querySelectorAll("[data-tid]")].map(el => Number(el.dataset.tid));
+  if (!ids.length) return;
+  const i = ids.indexOf(tkSel);
+  selectTask(ids[i < 0 ? (d > 0 ? 0 : ids.length - 1) : Math.max(0, Math.min(ids.length - 1, i + d))]);
+}
+
+function setTab(t) {
+  tab = t;
+  store.set("cs.tab", t);
+  render();
+}
+
+const F = n => $("tkForm").elements[n];
+function openForm(mode, t) {
+  tkMode = { mode, id: t?.id };
+  const th = mode === "thread" ? t : null, task = th ? null : t;
+  $("tkFormHead").textContent = mode === "edit" ? `edit #${t.id}` : mode === "sub" ? `new subtask of #${t.id}` : th ? "new task from email" : "new task";
+  F("title").value = mode === "edit" ? t.title : th ? th.subject.replace(/^(\s*(re|r|i|fw|fwd|rif)\s*:\s*)+/i, "") : "";
+  F("project").value = th ? th.guess || "" : task ? task.rel || task.client : "";
+  F("kind").value = task ? task.kind : "fix";
+  F("priority").value = mode === "edit" ? t.priority || "" : "";
+  F("summary").value = mode === "edit" ? t.summary : th ? `${th.sender}: ${th.snippet}` : "";
+  $("tkErr").textContent = "";
+  $("tkForm").hidden = false;
+  if (tab !== "tasks") setTab("tasks");
+  F("title").focus();
+  $("tkForm").scrollIntoView({ block: "nearest" });
+}
+function closeForm() { $("tkForm").hidden = true; tkMode = null; renderHint(); }
+
+async function tkUpdate(fields) {
+  if (!tkCur) return false;
+  let ok = true;
+  try { tkCur = await api("/api/task", { id: tkCur.id, ...fields }); }
+  catch (e) { flash = [`could not save #${tkCur.id}: ${e.message}`, Date.now()]; ok = false; }
+  tkInfoSig = "";
+  await poll();
+  return ok;
+}
+
 function render() {
+  const onT = tab === "tasks";
+  $("tabs").querySelectorAll("[data-tab]").forEach(b => { b.classList.toggle("on", b.dataset.tab === tab); b.setAttribute("aria-pressed", String(b.dataset.tab === tab)); });
   if (!S) { renderHint(); return; }
   const rows = S.sessions;
   $("head").innerHTML = headHTML(rows);
   const empty = $("empty");
-  empty.hidden = rows.length > 0;
+  empty.hidden = onT || rows.length > 0;
   if (!rows.length) empty.innerHTML = showAll ? `No sessions in the last 24h.` : `No live Claude sessions. Press <b>a</b> to include sessions ended in the last 24h.`;
-  $("tiles").hidden = view !== "tiles";
-  $("table").hidden = view !== "table";
-  if (view === "tiles") patch($("tiles"), rows.map(r => ({ key: r.sid, html: tileHTML(r) })));
-  else {
+  $("tiles").hidden = onT || view !== "tiles";
+  $("table").hidden = onT || view !== "table";
+  $("tasks").hidden = !onT;
+  $("note").hidden = onT;
+  if (!onT && view === "tiles") patch($("tiles"), rows.map(r => ({ key: r.sid, html: tileHTML(r) })));
+  else if (!onT) {
     const html = tableHTML(rows);
     if ($("table")._html !== html) { $("table").innerHTML = html; $("table")._html = html; }
   }
   $("note").textContent = `ctx = last request input · window ${S.cfg.window ? "$CLAUDE_CTX_WINDOW" : "200k, 1M if peak>200k"}`;
   $("usage").innerHTML = usageHTML(S.usage);
   renderProjects();
+  renderTasks();
 
   const on = chatOn();
   $("chat").classList.toggle("on", on);
@@ -373,7 +729,10 @@ function renderHint() {
   const keys = chatOn()
     ? "enter send · esc close chat · ctrl-u clear line · /clear new chat"
     : document.activeElement === $("projQ") ? "type to filter · ↑↓ select · enter open in VS Code · esc close"
-    : `←↑↓→ select · enter/click focus · / chat · p projects · a ${showAll ? "hide ended" : "show ended"} · t ${view === "tiles" ? "table" : "tiles"} · r refresh${installPrompt ? " · i install app" : ""}`;
+    : document.activeElement?.closest?.("#tkForm") ? "enter saves (⌘/ctrl-enter in the description) · esc cancels"
+    : document.activeElement === $("tkNote") ? "enter saves the note · esc leaves"
+    : tab === "tasks" ? `1 sessions · ↑↓ select · n new task · e edit · esc close · a ${tkShow === "all" ? "open only" : "show all"} · s scan inbox · m inbox log · / chat · r refresh`
+    : `←↑↓→ select · enter/click focus · 2 tasks · / chat · p projects · a ${showAll ? "hide ended" : "show ended"} · t ${view === "tiles" ? "table" : "tiles"} · r refresh${installPrompt ? " · i install app" : ""}`;
   let h = esc(keys);
   if (flash[0] && Date.now() - flash[1] < 5000) h += `<span class="flash">▸ ${esc(flash[0])}</span>`;
   if (offline) h += `<span class="off">✗ server not reachable, retrying…</span>`;
@@ -385,7 +744,11 @@ async function api(path, body) {
     ? { headers: { "X-CS-Token": TOKEN } }
     : { method: "POST", headers: { "X-CS-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (r.status === 403) reloadForToken();
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    let m = `HTTP ${r.status}`;
+    try { m = (await r.json()).error || m; } catch {}
+    throw Object.assign(new Error(m), { status: r.status });
+  }
   return r.json();
 }
 
@@ -495,6 +858,17 @@ function move(key) {
 document.addEventListener("keydown", e => {
   if (e.target.closest?.("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key;
+  if (k === "1" || k === "2") { setTab(k === "1" ? "sessions" : "tasks"); return; }
+  if (tab === "tasks") {
+    if (k === "ArrowDown" || k === "ArrowUp") { e.preventDefault(); moveTask(k === "ArrowDown" ? 1 : -1); return; }
+    if (k === "n" || k === "N") { e.preventDefault(); openForm("new"); return; }
+    if ((k === "e" || k === "E") && tkCur && tkCur.id === tkSel) { e.preventDefault(); openForm("edit", tkCur); return; }
+    if (k === "Escape") { if (!$("tkForm").hidden) closeForm(); else selectTask(null); return; }
+    if (k === "a" || k === "A") { tkShow = tkShow === "all" ? "open" : "all"; store.set("cs.tkshow", tkShow); render(); return; }
+    if (k === "s" || k === "S") { e.preventDefault(); scanNow(); return; }
+    if (k === "m" || k === "M") { e.preventDefault(); toggleMail(); return; }
+    if (k === "Enter" || k === " " || k.startsWith("Arrow") || k === "t" || k === "T") return;
+  }
   if (k.startsWith("Arrow")) { e.preventDefault(); move(k); }
   else if (k === "Enter" || k === " ") { e.preventDefault(); focusSel(); }
   else if (k === "/") { e.preventDefault(); ask.focus(); }
@@ -565,10 +939,128 @@ dirIn.addEventListener("keydown", async e => {
     dirIn.blur();
     poll(true);
   } catch (err) {
-    flash = [err.message === "HTTP 400" ? `not a folder: ${dirIn.value}` : `could not save: ${err.message}`, Date.now()];
+    flash = [err.status === 400 ? `not a folder: ${dirIn.value}` : `could not save: ${err.message}`, Date.now()];
   }
   renderHint();
 });
+
+$("tabs").addEventListener("click", e => {
+  const b = e.target.closest("[data-tab]");
+  if (b) setTab(b.dataset.tab);
+});
+$("tkStatus").innerHTML = Object.entries(TS).map(([k, v]) => `<option value="${k}">${v[0]}</option>`).join("");
+$("tkNew").addEventListener("click", () => openForm("new"));
+$("tkCancel").addEventListener("click", closeForm);
+$("tkShow").addEventListener("click", e => {
+  const b = e.target.closest("[data-show]");
+  if (!b) return;
+  tkShow = b.dataset.show;
+  store.set("cs.tkshow", tkShow);
+  render();
+});
+$("tkList").addEventListener("click", e => {
+  const el = e.target.closest("[data-tid]");
+  if (el) selectTask(Number(el.dataset.tid) === tkSel ? null : Number(el.dataset.tid));
+});
+$("tkDetail").addEventListener("click", e => {
+  if (e.target.closest("[data-act=close]")) { selectTask(null); return; }
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (act === "analyze") return taskSession(false);
+  if (act === "resume") return taskSession(true);
+  if (act === "again") { if (confirm(`Start a new session for #${tkCur?.id}? The current plan stays in the task until the new session posts one.`)) taskSession(false); return; }
+  if (act === "focus" && tkCur?.session_id) {
+    api("/api/focus", { sid: tkCur.session_id }).then(r => { flash = [r.msg, Date.now()]; renderHint(); }).catch(err => { flash = [`focus failed: ${err.message}`, Date.now()]; renderHint(); });
+    return;
+  }
+  const go = e.target.closest("[data-goto]");
+  if (go) { e.preventDefault(); selectTask(Number(go.dataset.goto)); }
+});
+const tkForm = $("tkForm");
+tkForm.addEventListener("submit", async e => {
+  e.preventDefault();
+  if (!tkMode) return;
+  const { mode, id } = tkMode;
+  const body = { title: F("title").value, project: F("project").value.trim(), kind: F("kind").value, priority: F("priority").value || null, summary: F("summary").value };
+  if (mode === "edit") body.id = id;
+  if (mode === "sub") body.parent_id = id;
+  if (mode === "thread") body.thread_id = id;
+  if (!body.project) {
+    if (mode !== "sub") { $("tkErr").textContent = "pick a project"; F("project").focus(); return; }
+    delete body.project;
+  }
+  try {
+    const t = await api("/api/task", body);
+    closeForm();
+    flash = [mode === "edit" ? `saved #${t.id}` : `added #${t.id}`, Date.now()];
+    tkCur = t;
+    tkSel = t.id;
+    tkInfoSig = "";
+    await poll();
+    document.querySelector(`.tk-row[data-tid="${t.id}"]`)?.scrollIntoView({ block: "nearest" });
+  } catch (err) {
+    $("tkErr").textContent = err.message;
+  }
+});
+tkForm.addEventListener("keydown", e => {
+  if (e.key === "Escape") { e.preventDefault(); closeForm(); }
+  else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkForm.requestSubmit(); }
+});
+tkForm.addEventListener("focusin", renderHint);
+tkForm.addEventListener("focusout", () => setTimeout(renderHint));
+for (const [id, key] of [["tkStatus", "status"], ["tkPrio", "priority"], ["tkKind", "kind"]])
+  $(id).addEventListener("change", e => tkUpdate({ [key]: e.target.value || null }));
+$("tkScan").addEventListener("click", scanNow);
+$("tkMail").addEventListener("click", toggleMail);
+$("tkMailClose").addEventListener("click", toggleMail);
+$("tkMailBox").addEventListener("click", e => {
+  const go = e.target.closest("[data-goto]"), mk = e.target.closest("[data-make]");
+  if (go) { e.preventDefault(); selectTask(Number(go.dataset.goto)); }
+  else if (mk) { const th = mailData?.threads.find(x => x.id === mk.dataset.make); if (th) openForm("thread", th); }
+});
+async function inboxSet(body) {
+  try { await api("/api/inbox/settings", body); }
+  catch (e) { flash = [`could not save: ${e.message}`, Date.now()]; }
+  await poll();
+}
+$("tkAuto").addEventListener("change", e => inboxSet({ auto: e.target.checked }));
+$("tkEvery").addEventListener("change", e => inboxSet({ every: Number(e.target.value) }));
+$("tkDismiss").addEventListener("click", async () => {
+  const id = tkCur?.id;
+  if (id && await tkUpdate({ dismiss: true })) flash = [`#${id} is not a task: rejected, and later scans learn from it`, Date.now()];
+  renderHint();
+});
+$("tkEdit").addEventListener("click", () => { if (tkCur) openForm("edit", tkCur); });
+$("tkSub").addEventListener("click", () => { if (tkCur) openForm("sub", tkCur); });
+$("tkOpen").addEventListener("click", async () => {
+  if (!tkCur?.repo) return;
+  try { flash = [(await api("/api/task/open", { id: tkCur.id })).msg, Date.now()]; }
+  catch (e) { flash = [`could not open it: ${e.message}`, Date.now()]; }
+  renderHint();
+});
+$("tkDel").addEventListener("click", async () => {
+  const t = tkCur;
+  if (!t || !confirm(`Delete #${t.id} "${t.title}"${tkTasks().some(x => x.parent_id === t.id) ? " and its subtasks" : ""}?`)) return;
+  try {
+    await api("/api/task/delete", { id: t.id });
+    flash = [`deleted #${t.id}`, Date.now()];
+    tkSel = tkCur = null;
+  } catch (e) {
+    flash = [`could not delete #${t.id}: ${e.message}`, Date.now()];
+  }
+  await poll();
+});
+const tkNote = $("tkNote");
+tkNote.addEventListener("keydown", async e => {
+  if (e.key === "Escape") { e.preventDefault(); tkNote.blur(); return; }
+  if (e.key !== "Enter" || e.isComposing) return;
+  e.preventDefault();
+  const text = tkNote.value.trim();
+  if (!text) return;
+  tkNote.value = "";
+  if (!await tkUpdate({ note: text })) tkNote.value = text;
+});
+tkNote.addEventListener("focus", renderHint);
+tkNote.addEventListener("blur", renderHint);
 
 $("tiles").addEventListener("click", pick);
 $("table").addEventListener("click", pick);
