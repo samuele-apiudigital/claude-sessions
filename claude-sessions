@@ -19,9 +19,16 @@ table = any(a in ("-t", "--table") for a in args)
 watch = False
 web_only = any(a in ("-w", "--web") for a in args)
 HOME = os.path.expanduser("~/.claude")
+PI_HOME = os.path.expanduser(os.environ.get("PI_HOME", "~/.pi/agent"))
+PI_BIN = os.environ.get("CS_PI_BIN") or (os.path.expanduser("~/.pi/agent/bin/pi") if os.path.exists(os.path.expanduser("~/.pi/agent/bin/pi")) else shutil.which("pi"))
+PI_PROC_RE = re.compile(r"(?:\.bin/pi|pi-coding-agent/dist/bundle/cli\.js)(?:\s|$)")
 WINDOW = int(os.environ.get("CLAUDE_CTX_WINDOW", "0"))
+PI_WINDOW = int(os.environ.get("CS_PI_CTX_WINDOW", "0"))
 CHAT_DIR = f"{HOME}/state/cs-chat"
 CHAT_MODEL = os.environ.get("CS_CHAT_MODEL", "haiku")
+PI_CHAT_MODEL = os.environ.get("CS_PI_CHAT_MODEL", "")
+CHAT_PROV = os.environ.get("CS_CHAT_PROVIDER", "claude").lower()
+if CHAT_PROV not in ("claude", "pi"): CHAT_PROV = "claude"
 CHAT_ROWS = int(os.environ.get("CS_CHAT_ROWS", "8"))
 AGENT_ROWS = max(2, int(os.environ.get("CS_AGENT_ROWS", "4")))
 ROOT = os.path.dirname(os.path.realpath(os.environ.get("CS_SELF") or "."))
@@ -62,6 +69,261 @@ def tag(text, name):
 def transcript(sid):
     m = glob.glob(f"{HOME}/projects/*/{sid}.jsonl")
     return m[0] if m else None
+
+# ── pi ──────────────────────────────────────────────────────────────────
+
+def _pi_window_files():
+    fs = [x for x in glob.glob(f"{PI_HOME}/models*.json") if os.path.isfile(x)]
+    fs += sorted(glob.glob(os.path.join(PI_HOME, "install/releases/*/node_modules/@earendil-works/pi-ai/dist/providers/data/*.json")))
+    return fs
+
+PI_WIN_FILES = _pi_window_files()
+PI_WIN_CACHE = {}
+
+def pi_model_window(provider, model):
+    if not model: return None
+    key = (provider or "", model)
+    if key in PI_WIN_CACHE: return PI_WIN_CACHE[key]
+    w = 0
+    for jf in PI_WIN_FILES:
+        try: d = json.load(open(jf, encoding="utf-8"))
+        except Exception: continue
+        if not isinstance(d, dict): continue
+        for prov, body in (d.get("providers") or {}).items():
+            if provider and prov != provider: continue
+            for m in (body.get("models") or []):
+                if isinstance(m, dict) and (m.get("id") == model or m.get("name") == model):
+                    w = int(m.get("contextWindow") or 0); break
+        if w: break
+        for api, mm in d.items():
+            if not isinstance(mm, dict): continue
+            for k, m in mm.items():
+                if isinstance(m, dict) and m.get("id") == model and (not provider or m.get("provider") == provider):
+                    w = int(m.get("contextWindow") or 0); break
+            if w: break
+        if w: break
+    PI_WIN_CACHE[key] = w or None
+    return PI_WIN_CACHE[key]
+
+def pi_default_model():
+    try: return json.load(open(f"{PI_HOME}/settings.json", encoding="utf-8")).get("defaultModel") or ""
+    except Exception: return ""
+
+def pi_default_provider():
+    try: return json.load(open(f"{PI_HOME}/settings.json", encoding="utf-8")).get("defaultProvider") or ""
+    except Exception: return ""
+
+def pi_chat_model():
+    return PI_CHAT_MODEL or pi_default_model()
+
+def etime_sec(s):
+    neg = s.startswith("-"); s = s.lstrip("-")
+    d = 0
+    if "-" in s:
+        d, s = s.split("-", 1); d = int(d)
+    p = s.split(":")
+    h = mi = se = 0
+    if len(p) == 3: h, mi, se = map(int, p)
+    elif len(p) == 2: mi, se = map(int, p)
+    elif p and p[0].isdigit(): se = int(p[0])
+    v = d * 86400 + h * 3600 + mi * 60 + se
+    return -v if neg else v
+
+def pi_proc_cwd(pid):
+    try:
+        if os.path.isdir("/proc"):
+            p = f"/proc/{pid}/cwd"
+            return os.readlink(p) if os.path.exists(p) else None
+        r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=1)
+        for ln in r.stdout.splitlines():
+            if ln.startswith("n"): return ln[1:]
+    except Exception:
+        pass
+    return None
+
+def pi_procs():
+    out = {}
+    try:
+        ps = subprocess.check_output(["ps", "-eo", "pid=,etime=,command="], text=True, timeout=2)
+    except Exception:
+        return out
+    now = time.time()
+    for ln in ps.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) < 3 or not PI_PROC_RE.search(parts[2]): continue
+        try: pid = int(parts[0])
+        except ValueError: continue
+        cwd = pi_proc_cwd(pid)
+        if not cwd: continue
+        try: age = max(etime_sec(parts[1]), 0)
+        except Exception: age = 0
+        out[pid] = dict(cwd=cwd, start=now - age)
+    return out
+
+def pi_header(f):
+    try:
+        with open(f, encoding="utf-8", errors="ignore") as fh:
+            d = json.loads(fh.readline())
+        if d.get("type") != "session": return None
+        return dict(id=d.get("id") or "", cwd=d.get("cwd") or "",
+            t=epoch(d.get("timestamp")) if d.get("timestamp") else 0)
+    except Exception:
+        return None
+
+def pi_branch(entries):
+    if not entries: return []
+    byid = {e["id"]: e for e in entries if e.get("id")}
+    chain, e, seen = [], entries[-1], set()
+    while e is not None and e.get("id") and e["id"] not in seen:
+        seen.add(e["id"]); chain.append(e)
+        e = byid.get(e.get("parentId")) if e.get("parentId") else None
+    chain.reverse()
+    return chain
+
+def git_branch(d):
+    try:
+        d = d or ""
+        g = os.path.join(d, ".git")
+        head = os.path.join(g, "HEAD")
+        if not os.path.isdir(g):
+            if not os.path.isfile(g): return ""
+            gd = open(g).read().strip()
+            if not gd.startswith("gitdir:"): return ""
+            head = os.path.join(d, gd.split(":", 1)[1].strip(), "HEAD")
+        if not os.path.isfile(head): return ""
+        h = open(head).read().strip()
+        return os.path.basename(h[4:].strip()) if h.startswith("ref:") else h[:8]
+    except Exception:
+        return ""
+
+def _pi_msg_text(m):
+    c = (m or {}).get("content")
+    if isinstance(c, str): return c
+    return " ".join(x.get("text", "") for x in (c or []) if isinstance(x, dict) and x.get("type") == "text")
+
+def pi_stats(path, hdr):
+    hdr = hdr or {}
+    st = dict(model="", pprov="", ctx=0, peak=0, turns=0, out=0, inp=0, cread=0, ccreate=0, tools=0,
+        hist=[], title="", branch=git_branch(hdr.get("cwd")), wd=hdr.get("cwd") or "", ultra=False,
+        prompt="", cur_task="", done_task="", agents=[], status="idle",
+        sid=hdr.get("id") or "", cost=0.0, started=hdr.get("t") or 0, updated=0)
+    try: entries = [json.loads(l) for l in open(path, encoding="utf-8", errors="ignore")]
+    except Exception: return st
+    entries = [e for e in entries if isinstance(e, dict)]
+    chain = pi_branch(entries)
+    if not chain: return st
+    updated = 0
+    for e in chain:
+        ts = epoch(e.get("timestamp")) if e.get("timestamp") else 0
+        if ts: updated = max(updated, ts)
+        t = e.get("type")
+        if t == "model_change" and e.get("modelId"):
+            st["pprov"], st["model"] = e.get("provider") or st["pprov"], e["modelId"]
+            continue
+        if t != "message": continue
+        m = e.get("message") or {}
+        role = m.get("role")
+        if role == "assistant":
+            u = m.get("usage") or {}
+            i, cr, cc, o = (int(u.get(k, 0) or 0) for k in ("input", "cacheRead", "cacheWrite", "output"))
+            st["ctx"] = i + cr + cc
+            st["peak"] = max(st["peak"], st["ctx"])
+            if st["ctx"]: st["hist"].append(st["ctx"])
+            st["out"] += o; st["inp"] += i; st["cread"] += cr; st["ccreate"] += cc
+            st["cost"] += float((m.get("cost") or {}).get("total") or 0)
+            if m.get("model"): st["pprov"], st["model"] = m.get("provider") or st["pprov"], m["model"]
+            for x in m.get("content") or []:
+                if isinstance(x, dict) and x.get("type") == "toolCall": st["tools"] += 1
+            txt = _pi_msg_text(m).strip()
+            if txt: st["done_task"] = txt[:400]
+        elif role == "user":
+            txt = _pi_msg_text(m).strip()
+            if txt and not txt.startswith("[") and "<system-reminder>" not in txt:
+                st["turns"] += 1
+                if not st["title"]: st["title"], st["prompt"] = txt[:120], txt[:120]
+    st["hist"] = st["hist"][-36:]
+    tip = chain[-1]
+    t = tip.get("type")
+    if t == "message":
+        role = (tip.get("message") or {}).get("role")
+        if role == "assistant":
+            st["status"] = "idle"
+        elif role == "user":
+            st["status"] = "busy"; st["cur_task"] = _pi_msg_text(tip.get("message")).strip()[:400]
+        elif role == "toolResult":
+            st["status"] = "busy"; st["cur_task"] = f"running {(tip.get('message') or {}).get('toolName') or 'tool'}…"
+    elif t in ("compaction", "context_edit"):
+        st["status"] = "busy"; st["cur_task"] = "compacting…"
+    elif t == "session":
+        st["status"] = "busy"; st["cur_task"] = "starting…"
+    else:
+        st["status"] = "idle"
+    if not updated:
+        try: updated = os.path.getmtime(path)
+        except OSError: updated = time.time()
+    st["updated"] = updated
+    return st
+
+def ctx_window(r):
+    if r.get("provider") == "pi":
+        return PI_WINDOW or pi_model_window(r.get("pprov"), r.get("model")) or 200_000
+    return WINDOW or (1_000_000 if r.get("peak", 0) > 200_000 else 200_000)
+
+def collect_pi(ended=None, procs=None):
+    ended = show_all if ended is None else ended
+    now = time.time()
+    if procs is None: procs = pi_procs()
+    rows, used = [], set()
+    files = []
+    for f in glob.glob(f"{PI_HOME}/sessions/**/*.jsonl", recursive=True):
+        try: mt = os.path.getmtime(f)
+        except OSError: continue
+        if now - mt > 86400: continue
+        files.append((mt, f))
+    files.sort(reverse=True)
+    for pid, info in procs.items():
+        cwd, start = info["cwd"], info["start"]
+        if cwd == CHAT_DIR: continue
+        best = None
+        for mt, f in files:
+            if f in used: continue
+            hdr = pi_header(f)
+            if not hdr or hdr.get("cwd") != cwd: continue
+            if hdr.get("t") and (hdr["t"] > start + 120 or hdr["t"] < start - 86400): continue
+            if best is None or mt > best[0]: best = (mt, f, hdr)
+        if best:
+            used.add(best[1])
+            st = pi_stats(best[1], best[2])
+            row = dict(pid=pid, live=True, status=st["status"], name=st["title"] or "pi",
+                kind="pi", entry="cli", version="", provider="pi", uptime=dur(now - start))
+            row.update(st)
+            row["sid"] = st["sid"] or os.path.basename(best[1])
+            row["cwd"] = st["wd"] or cwd
+            row["started"] = int((st["started"] or start) * 1000)
+            row["updated"] = int(st["updated"] * 1000)
+            rows.append(row)
+        else:
+            rows.append(dict(sid=f"pi-proc-{pid}", pid=pid, live=True, status="busy", name="pi", cwd=cwd,
+                kind="pi", entry="cli", version="", provider="pi", started=int(start * 1000),
+                updated=int(now * 1000), uptime=dur(now - start), model="", pprov="", ctx=0, peak=0, turns=0,
+                out=0, inp=0, cread=0, ccreate=0, tools=0, hist=[], title="", prompt="",
+                cur_task="starting…", done_task="", branch=git_branch(cwd), agents=[], ultra=False,
+                cost=0.0, wd=cwd))
+    if ended:
+        for mt, f in files:
+            if f in used: continue
+            hdr = pi_header(f)
+            if not hdr or hdr.get("cwd") == CHAT_DIR: continue
+            st = pi_stats(f, hdr)
+            row = dict(pid=None, live=False, status="ended", name=st["title"] or "pi",
+                kind="pi", entry="cli", version="", provider="pi", uptime="-")
+            row.update(st)
+            row["sid"] = st["sid"] or os.path.basename(f)
+            row["cwd"] = st["wd"]
+            row["started"] = int((st["started"] or mt) * 1000)
+            row["updated"] = int(st["updated"] * 1000)
+            rows.append(row)
+    return rows
 
 def stats(path):
     s = dict(model="-", ctx=0, peak=0, turns=0, out=0, inp=0, cread=0, ccreate=0, tools=0, hist=[], title="", branch="", wd="", ultra=False, prompt="", cur_task="", done_task="", subjects=None, ncreate=0, first=None, last=None, agents=[])
